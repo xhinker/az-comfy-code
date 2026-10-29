@@ -230,3 +230,6 @@ out/
 *private.*
 *test
 *test.*
+
+# Editor settings are per-machine (interpreter paths, ComfyUI checkout location)
+.vscode/settings.json
