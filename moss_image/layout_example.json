@@ -1,0 +1,28 @@
+{
+  "summary": {
+    "meta": ["poster"],
+    "canvas": "single",
+    "caption": "A minimalist autumn poster on warm cream paper, flat vector illustration, generous margins, a single persimmon branch in muted orange and slate."
+  },
+  "items": [
+    {
+      "label": "text",
+      "caption": "Large dark-slate uppercase title centered near the top, wide letter spacing.",
+      "text": "AUTUMN",
+      "bbox": [-420, -360, -300, 360]
+    },
+    {
+      "label": "text",
+      "caption": "Small lowercase subtitle centered below the title.",
+      "text": "harvest 2026",
+      "bbox": [-255, -190, -200, 190]
+    },
+    {
+      "label": "object",
+      "caption": "A persimmon branch with three ripe fruits and two leaves, lower center, flat vector style.",
+      "bbox": [-40, -280, 400, 280]
+    }
+  ],
+  "bbox_coord_space": "abs_centralized",
+  "bbox_format": "yxyx"
+}

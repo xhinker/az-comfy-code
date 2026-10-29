@@ -218,3 +218,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Generated output and scratch variants (az-comfy-code)
+# images written by moss_interactive*.py and moss_image_gen.py
+outputs/
+out/
+# on-disk weight staging created by --memory model/sequential/disk (can be GiB-sized)
+.offload_cache/
+# any file whose name ends in `private` or `test` (personal / scratch variants)
+*private
+*private.*
+*test
+*test.*

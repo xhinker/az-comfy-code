@@ -1,0 +1,27 @@
+# PyTorch: newest build for the CUDA this box runs (driver 610.57.04 = CUDA 13.3 capable,
+# toolkits 12.9 + 13.0 installed; RTX 5090 is sm_120, which needs cu128 or newer).
+# Resolved from the cu132 wheel index, so no version pin here - see requirements.lock.txt.
+torch
+torchvision
+torchao
+
+# The MOSS-Image code was verified against these (see moss_image/README.md):
+# diffusers has no MOSS pipeline; transformers 5.x is needed for the Qwen3.5 text encoder.
+diffusers==0.41.0
+transformers==5.20.2
+accelerate==1.10.1
+huggingface_hub==1.33.0
+safetensors==0.8.0
+tokenizers==0.23.3
+sentencepiece==0.2.2
+# kernels left out on purpose: kernels 0.10.0 pins huggingface-hub<1.0, which clashes with the hub 1.33.0
+# this stack runs on. The MOSS code does not import kernels.
+
+# images / misc
+numpy>=2.1
+pillow>=11
+opencv-python-headless>=4.14
+protobuf>=5
+PyYAML>=6
+tqdm>=4.66
+regex>=2024.5
