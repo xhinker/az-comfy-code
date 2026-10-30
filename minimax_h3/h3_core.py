@@ -19,6 +19,7 @@ Run with the ComfyUI venv:
 from __future__ import annotations
 
 import argparse
+import math
 import pathlib
 import sys
 import time
@@ -65,6 +66,79 @@ def image_tensor(path):
 
 
 # --------------------------------------------------------------------------- stage 2
+def image_size(path):
+    """(width, height) of an image file, without loading it into torch."""
+    from PIL import Image
+    with Image.open(path) as im:
+        return im.width, im.height
+
+
+def fit_size(image, long_side: int | None = None, *, length: int | None = None,
+             verbose: bool = True):
+    """Pick the H3 canvas from the source image: long side is the setting, short side follows.
+
+    MiniMax H3's canvas rules live in comfy_extras/nodes_minimax_h3.py and are not optional:
+    both axes must be multiples of CANVAS_MULTIPLE (32 = 16x VAE spatial compression x the
+    2x2 transformer patchify), and the trained canvas is a 768 short edge capped at
+    MAX_PIXELS = 768*1344. Passing e.g. 1000x1000 does not error, it just produces a latent
+    whose odd dimensions the patchify layer cannot tile.
+
+    long_side=None defers entirely to ComfyUI's own adapt_canvas(w, h) - the same rule the
+    reference-to-video node applies. With a long_side, the short side is derived from the
+    image's aspect ratio, then both are snapped to the 32 grid and the area is pulled back
+    under the cap if it does not fit (warned, not silent).
+
+    Returns (width, height) in the image's own orientation.
+    """
+    from comfy_extras.nodes_minimax_h3 import CANVAS_MULTIPLE, MAX_PIXELS, adapt_canvas, \
+        align_frame_count, video_latent_t
+
+    iw, ih = image_size(image)
+    if long_side is None:
+        w, h = adapt_canvas(iw, ih)
+    else:
+        ratio = iw / ih
+        long_side = max(CANVAS_MULTIPLE, round(long_side / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+        short = long_side / ratio if ratio >= 1 else long_side * ratio
+        short = max(CANVAS_MULTIPLE, round(short / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+        w, h = (long_side, short) if ratio >= 1 else (short, long_side)
+        if w * h > MAX_PIXELS:
+            scale = math.sqrt(MAX_PIXELS / (w * h))
+            # floor, not round: rounding up can land back over the cap (1000x1000 at
+            # long_side=1344 gave 1024x1024 = 1048576 px > 1032192)
+            w = max(CANVAS_MULTIPLE, int(w * scale // CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+            h = max(CANVAS_MULTIPLE, int(h * scale // CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+            while w * h > MAX_PIXELS:      # belt and braces after the floor
+                if w >= h:
+                    w -= CANVAS_MULTIPLE
+                else:
+                    h -= CANVAS_MULTIPLE
+            if verbose:
+                print(f"fit_size: {long_side}px long side exceeds H3's {MAX_PIXELS} px area cap "
+                      f"- scaled to {w}x{h}")
+
+    for name, v in (("width", w), ("height", h)):
+        if v % CANVAS_MULTIPLE:
+            raise ValueError(f"{name}={v} is not a multiple of {CANVAS_MULTIPLE}")
+        if not (CANVAS_MULTIPLE <= v <= 16384):
+            raise ValueError(f"{name}={v} outside [{CANVAS_MULTIPLE}, 16384]")
+
+    if verbose:
+        note = ""
+        if length is not None:
+            t = video_latent_t(align_frame_count(max(5, length)))
+            vox = t * (h // 16) * (w // 16)
+            note = f" | latent {t}x{h // 16}x{w // 16} = {vox} voxels, {vox // 4} tokens after 2x2 patchify"
+        print(f"fit_size: image {iw}x{ih} (ratio {ratio_note(iw, ih)}) -> canvas {w}x{h}, "
+              f"{w * h} px (cap {MAX_PIXELS}){note}")
+    return w, h
+
+
+def ratio_note(w, h):
+    g = math.gcd(w, h) or 1
+    return f"{w // g}:{h // g}"
+
+
 def encode(clip, vae, prompt: str, *, mode: str = "t2v", width: int = 1344, height: int = 768,
            length: int = 124, image: str | None = None, last_image: str | None = None,
            ref_images=(), ref_image_size: str = "match", audio_vae=None, release: bool = True):

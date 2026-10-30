@@ -143,6 +143,32 @@ is inherently soft no matter what the sampler does. `length` snaps to the 17k+5 
   denoising pass), and a frame count on the 17k+5 grid.
 
 
+## Canvas size: let the image decide (`h3_core.fit_size`)
+
+H3's canvas rules are not optional and they are not documented in the model card - they live
+in `comfy_extras/nodes_minimax_h3.py`:
+
+- `CANVAS_MULTIPLE = 32` - both axes must be multiples of 32 (16x VAE spatial compression
+  times the transformer's 2x2 patchify). A height of 860 gives a latent of 53 rows, which
+  cannot tile; nothing validates it for you in the image-to-video node.
+- `BASE_SHORT_EDGE = 768`, `MAX_PIXELS = 768 * 1344` - the trained canvas: 768 on the short
+  edge, capped at ~1.03 Mpx.
+
+`fit_size(image, long_side)` takes the **long side** as the setting, reads the image's own
+aspect ratio, derives the short side, snaps both to the 32 grid, and pulls the area back
+under the cap with a warning. `long_side=None` defers to ComfyUI's own `adapt_canvas`, which
+does the opposite - fixes the short edge at 768 and grows the long side. It also prints the
+latent shape and token count, which is what sol-attn's `min_tokens` gate keys off. `length`
+snaps up to the model's `17k+5` frame grid on the way in (126 -> 141 frames), so the printed
+latent depth is the real one, not the one you asked for.
+
+```python
+LONG_SIDE = 1344
+WIDTH, HEIGHT = H.fit_size(FIRST_FRAME, LONG_SIDE, length=LENGTH)
+# fit_size: image 896x1440 (ratio 28:45) -> canvas 768x1280, 983040 px (cap 1032192)
+#           | latent 42x80x48 = 161280 voxels, 40320 tokens after 2x2 patchify
+```
+
 ## The fast-workflow conversion (`minimax_h3_fast_t8.py`)
 
 Reproduces `ComfyUI/user/default/workflows/minimax_h3/minimax_h3_5s_fast.json` by calling the

@@ -147,13 +147,21 @@ def workflow_prompt(path=WORKFLOW, node_type="MiniMaxH3ImageToVideo"):
 STEPS = 8
 PROMPT = workflow_prompt()
 MODE, IMAGE = "i2v", FIRST_FRAME
-# matched to minimax_h3_fast_test.py so the two are directly comparable
-WIDTH, HEIGHT, LENGTH = 512, 860, 126
+# matched to minimax_h3_fast_t8.py so the two are directly comparable
+LENGTH = 126
 SAMPLER, SCHEDULER = "res_multistep", "simple"      # what h3_core_interactive.py uses
 # SAMPLER, SCHEDULER = "euler", "beta"              # one evaluation per step, like the workflow
-print(f"prompt {len(PROMPT)} chars | {WIDTH}x{HEIGHT} x {LENGTH} | {STEPS} steps | {SAMPLER}+{SCHEDULER}")
 
 import h3_core as H
+
+# The long side is the only size setting; the short side follows the first frame's aspect
+# ratio. H3 needs both axes to be multiples of 32 (16x VAE compression x the 2x2 patchify)
+# inside a 768*1344 area cap - the previous hardcoded 512x860 had a height of 860, which is
+# not a multiple of 32 (860 // 16 = 53, an odd latent row count the patchify cannot tile).
+# LONG_SIDE = None defers to ComfyUI's own adapt_canvas, which fixes the SHORT edge at 768.
+LONG_SIDE = 1280
+WIDTH, HEIGHT = H.fit_size(IMAGE, LONG_SIDE, length=LENGTH)
+print(f"prompt {len(PROMPT)} chars | {WIDTH}x{HEIGHT} x {LENGTH} | {STEPS} steps | {SAMPLER}+{SCHEDULER}")
 
 _t = time.perf_counter()
 cond, latent = H.encode(clip, vae, PROMPT, mode=MODE, width=WIDTH, height=HEIGHT,
