@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import math
 import pathlib
+import re
 import sys
 import time
 from fractions import Fraction
@@ -34,6 +35,7 @@ from h3_load import (UNET, CLIP, VAE_VIDEO, VAE_AUDIO, free, free_all, load_diff
                      sigma_shift, attention_backend, vram_gb)
 
 OUT_DIR = BASE / "outputs"
+PROMPT_DIR = BASE / "prompts"        # gitignored: prompts are working content, not code
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -66,6 +68,31 @@ def image_tensor(path):
 
 
 # --------------------------------------------------------------------------- stage 2
+def read_prompt(path=None, *, fallback: str | None = None, verbose: bool = True) -> str | None:
+    """Prompt text from a markdown file instead of out of the workflow graph.
+
+    Defaults to minimax_h3/prompts/prompt.md. The file is plain text as far as the model is
+    concerned - headings included are passed through verbatim - but markdown comments
+    (<!-- like this -->) are stripped, so the file can carry its own notes. An empty or
+    missing file returns `fallback` with a warning rather than generating nothing: the
+    scripts keep working before the prompt is written, and a wiped file is loud, not silent.
+    """
+    p = pathlib.Path(path) if path is not None else PROMPT_DIR / "prompt.md"
+    if not p.is_file():
+        if verbose:
+            print(f"read_prompt: {p} does not exist"
+                  f"{' - using the fallback prompt' if fallback else ''}")
+        return fallback
+    text = re.sub(r"<!--.*?-->", "", p.read_text(encoding="utf-8"), flags=re.S).strip()
+    if not text:
+        if verbose:
+            print(f"read_prompt: {p.name} is empty - using the fallback prompt")
+        return fallback
+    if verbose:
+        print(f"read_prompt: {p.name} {len(text)} chars")
+    return text
+
+
 def image_size(path):
     """(width, height) of an image file, without loading it into torch."""
     from PIL import Image

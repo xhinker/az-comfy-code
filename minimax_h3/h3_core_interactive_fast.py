@@ -66,10 +66,7 @@ TE_GPU, VAE_GPU = (2, 2)
 # RAM on GPU 2 (keep=False) instead.
 SUPPORT_KEEP = True
 
-# the reference and the prompt this test borrows from the saved fast workflow
-WORKFLOW = COMFY / "user/default/workflows/minimax_h3/minimax_h3_5s_fast.json"
-
-for _p in (UNET, CLIP, VAE, AUDIO_VAE, WORKFLOW):
+for _p in (UNET, CLIP, VAE, AUDIO_VAE):
     print("OK      " if pathlib.Path(_p).is_file() else "MISSING ", _p)
 
 
@@ -103,7 +100,7 @@ CONTENT = [] if (FLEX and not CONTENT_ON_FLEX) else [
 ]
 LORAS = DISTILL + CONTENT
 
-for _p in [UNET, CLIP, VAE, AUDIO_VAE, WORKFLOW, *[p for p, _ in LORAS]]:
+for _p in [UNET, CLIP, VAE, AUDIO_VAE, *[p for p, _ in LORAS]]:
     print("OK      " if pathlib.Path(_p).is_file() else "MISSING ", _p)
 
 # %% 2. engine - must run before any model touches CUDA; switches on DynamicVRAM
@@ -157,18 +154,8 @@ model = L.sol_attn_t8(model, tau=1.3, start_percent=0.2, end_percent=0.9, min_to
 # model = L.sparse_attention(model, "sol-attn", tau=1.3, start_percent=0.2)
 
 
-# %% 7. prompt and geometry - taken from the fast workflow, not rewritten here
-import json
-
-def workflow_prompt(path=WORKFLOW, node_type="MiniMaxH3ImageToVideo"):
-    wf = json.loads(pathlib.Path(path).read_text())
-    for n in wf["nodes"]:
-        if n["type"] == node_type:
-            return n["widgets_values"][0]
-    raise KeyError(node_type)
-
+# %% 7. prompt and geometry
 STEPS = 6 if FLEX else 8      # Flex is a six-NFE adapter
-PROMPT = workflow_prompt()
 
 FIRST_FRAME = "/home/andrewzhu/storage_8t_4/comfyui_output/output/WanVideo_SCAIL_00016.png"
 MODE, IMAGE = "i2v", FIRST_FRAME
@@ -182,6 +169,15 @@ SAMPLER, SCHEDULER = ("lcm", "simple") if FLEX else ("res_multistep", "simple")
 # SAMPLER, SCHEDULER = "euler", "beta"              # one evaluation per step, like the workflow
 
 import h3_core as H
+
+# The prompt lives in a markdown file. prompts/ is gitignored - prompt drafts are working
+# content, not source. None resolves to minimax_h3/prompts/prompt.md; point PROMPT_FILE at
+# another file to keep several prompts side by side. There is no fallback to a saved graph
+# any more: an empty file stops the run instead of quietly generating old graph text.
+PROMPT_FILE = None
+PROMPT = H.read_prompt(PROMPT_FILE)
+if not PROMPT:
+    raise ValueError(f"no prompt - write one in {BASE / 'prompts' / 'prompt.md'}")
 
 # seconds wins over the frame count, and snaps up to H3's 17k+5 grid (5.0s -> 124 frames)
 if SECONDS is not None:
