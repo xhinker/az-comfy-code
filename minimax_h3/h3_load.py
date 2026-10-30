@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+"""Component loaders for MiniMax H3, on ComfyUI's core code.
+
+One function per component, each exposing the parameters of the matching ComfyUI
+node, so you can load exactly one thing at a time from an interactive session:
+
+    load_diffusion_model()   -> UNETLoader        (unet_name, weight_dtype)
+    load_text_encoder()      -> CLIPLoader        (clip_name, type, device)
+    load_vae()               -> VAELoader         (vae_name)
+    load_lora(model, ...)    -> LoraLoaderModelOnly (lora_name, strength_model)
+
+init_engine() has to run first. It does the two assignments main.py does and an
+importing script has to repeat: comfy.memory_management.aimdo_enabled = True and
+CoreModelPatcher = ModelPatcherDynamic. Those are what switch on DynamicVRAM -
+weights memory-mapped from disk as file slices and streamed into VRAM layer by
+layer, which is both why ComfyUI loads a 32 GB model in seconds and why it can
+free VRAM automatically when something else needs it. Without them the whole
+transformer is loaded resident and the video VAE has nowhere to decode.
+
+Run with the ComfyUI venv (comfy-kitchen, comfy-aimdo, sageattention live there):
+
+    /mnt/data_2t_3/github_repos/ComfyUI/venv_py312_comfyui/bin/python
+"""
+from __future__ import annotations
+
+import logging
+import pathlib
+import sys
+
+COMFY = pathlib.Path("/mnt/data_2t_3/github_repos/ComfyUI")   # the engine install
+
+# The interpreter this needs: comfy-kitchen, comfy-aimdo and the attention kernels are
+# installed there and nowhere else. In VS Code, select it as the notebook kernel.
+PYTHON = "/mnt/data_2t_3/github_repos/ComfyUI/venv_py312_comfyui/bin/python"
+
+# Full paths, so there is nothing to guess. Every loader also accepts a ComfyUI-relative
+# name (looked up in the model folders) or an absolute path like these.
+# int8 is the default video VAE because it is the one that fits: the fp16 decoder's
+# activations do not leave room next to the DynamicVRAM weight cache on a 32 GB card.
+UNET = f"{COMFY}/models/diffusion_models/minimax_h3/MiniMax-H3-Ref2VA_int8_convrot.safetensors"
+CLIP = f"{COMFY}/models/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+VAE_VIDEO = f"{COMFY}/models/vae/minimax_h3/minimax_h3_video_vae_int8_convrot.safetensors"
+VAE_VIDEO_FP16 = f"{COMFY}/models/vae/minimax_h3_video_vae_fp16.safetensors"
+VAE_AUDIO = f"{COMFY}/models/vae/minimax_h3_audio_vae_fp32.safetensors"
+LORA_TURBO = f"{COMFY}/models/loras/minimax_h3/minimax_h3_turbo_4step_ckpt850_pruned_comfyui.safetensors"
+
+_M = None       # the imported comfy modules, filled by init_engine()
+
+
+def resolve(folder: str, name: str) -> str:
+    """An absolute path is used as-is; anything else is looked up in ComfyUI's folders."""
+    if name.startswith("/"):
+        if not pathlib.Path(name).is_file():
+            raise FileNotFoundError(f"no model file at {name}")
+        return name
+    return _M["folder_paths"].get_full_path_or_raise(folder, name)
+
+
+def init_engine(verbose: bool = True, vram_headroom_gb: float = 0.0, devices=None):
+    """Bootstrap the comfy package and switch on DynamicVRAM. Returns the module map.
+
+    Every entry point in this file calls it, so an interactive session can just start
+    calling loaders - but calling it yourself first is how you control logging.
+    """
+    global _M
+    if _M is not None:
+        return _M
+
+    if str(COMFY) not in sys.path:
+        sys.path.insert(0, str(COMFY))
+
+    # comfy.cli_args parses sys.argv at import time; park our own flags so argparse
+    # doesn't die on the first unrecognised option.
+    # Order matters twice over. comfy_aimdo.host_buffer snapshots control.lib at import
+    # time (lib = control.lib), so the native library has to be loaded BEFORE any comfy
+    # module that imports it - otherwise HostBuffer dies on a None lib. And comfy's own
+    # cli_args parses sys.argv on import, so our flags have to be parked meanwhile.
+    try:
+        import comfy_aimdo.control as aimdo
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            f"comfy_aimdo is not installed in this interpreter ({sys.executable}).\n"
+            f"  command line:  {PYTHON} your_script.py\n"
+            f"  VS Code:       Ctrl+Shift+P -> 'Notebook: Select Notebook Kernel' ->\n"
+            f"                 'Python Environments' or 'Existing' and pick\n"
+            f"                 {PYTHON}\n"
+            f"  Jupyter:       {PYTHON} -m ipykernel install --user --name comfyui"
+        ) from exc
+
+    argv, sys.argv = sys.argv, [sys.argv[0]]
+    try:
+        from comfy.cli_args import args, enables_dynamic_vram
+        aimdo_headroom = None if args.reserve_vram is None else int(args.reserve_vram * 1024 ** 3)
+        aimdo_ready = aimdo.init(simple_vram_headroom=aimdo_headroom,
+                                 nvml_pressure=not args.disable_nvml_pressure)
+        import comfy.memory_management
+        import comfy.model_management
+        import comfy.model_patcher
+        import comfy.sd
+        import comfy.utils
+        import folder_paths
+    finally:
+        sys.argv = argv
+
+    if verbose:
+        # ComfyUI's INFO lines are what tell you whether staging engaged:
+        # "Model MiniMaxH3 prepared for dynamic VRAM loading. 32427MB Staged."
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+        logging.getLogger().setLevel(logging.INFO)   # comfy already installed handlers
+
+    mm = comfy.model_management
+    dynamic, ok, gpu_ids, aimdo_ready = False, False, [], locals().get("aimdo_ready", False)
+    if aimdo_ready and (args.enable_dynamic_vram or (enables_dynamic_vram() and mm.is_nvidia())):
+        # init() (above, before the comfy imports) loaded the native library;
+        # init_devices() arms each GPU. Calling it on its own silently returns False.
+        gpu_ids = list(devices) if devices is not None else [d.index for d in mm.get_all_torch_devices()]
+        # Two protocols across aimdo versions: bare device indices (0.4.9+) or
+        # (index, headroom_bytes) pairs. One form returns False on the other's build
+        # rather than raising, so try both instead of trusting a TypeError.
+        ok = False
+        for attempt in (gpu_ids,
+                        [(i, int((args.vram_headroom + vram_headroom_gb) * 1024 ** 3)) for i in gpu_ids]):
+            try:
+                ok = bool(aimdo.init_devices(attempt))
+            except TypeError:
+                continue
+            if ok:
+                break
+        if ok:
+            aimdo.set_log_info()
+            if vram_headroom_gb:
+                # The VRAM the dynamic budget keeps free, in bytes. VBAR treats the whole
+                # card as its weight cache; plain (non-VBAR) allocations - the video VAE's
+                # activations - have to fit in what's left, so leaving 1-2 GB off the table
+                # is what makes decode possible on a 32 GB card.
+                aimdo.set_simple_vram_headroom(int(vram_headroom_gb * 1024 ** 3))
+            # The two lines that make it real. Everything downstream - the mmap'd
+            # safetensors reader, ModelPatcherDynamic, the prefetcher - keys off these.
+            comfy.model_patcher.CoreModelPatcher = comfy.model_patcher.ModelPatcherDynamic
+            comfy.memory_management.aimdo_enabled = True
+            dynamic = True
+    if verbose:
+        logging.info(f"aimdo.init={aimdo_ready} armed={ok} gpu_ids={gpu_ids} "
+                     f"visible={torch.cuda.device_count() if torch.cuda.is_available() else 0}")
+    if not dynamic:
+        logging.warning("DynamicVRAM is OFF: models will load fully resident, and a 32 GB "
+                        "transformer plus a video VAE will not fit on a 32 GB card. Usually "
+                        "aimdo failed to arm one of the visible GPUs - on a multi-GPU box run "
+                        "with CUDA_VISIBLE_DEVICES=<gpu>, or pass devices=[0].")
+
+    _M = dict(comfy=comfy, folder_paths=folder_paths, args=args, dynamic_vram=dynamic)
+    return _M
+
+
+# --------------------------------------------------------------------------- loaders
+def load_diffusion_model(unet_name: str = UNET, weight_dtype: str = "default",
+                         disable_dynamic: bool = False):
+    """UNETLoader. weight_dtype: default | fp8_e4m3fn | fp8_e4m3fn_fast | fp8_e5m2.
+
+    Returns a ModelPatcher whose weights are staged on disk/RAM and streamed to the
+    GPU on demand - the same path ComfyUI uses, so the load time is the same.
+    """
+    m = init_engine()
+    options = {}
+    if weight_dtype == "fp8_e4m3fn":
+        options["dtype"] = torch_dtype("float8_e4m3fn")
+    elif weight_dtype == "fp8_e4m3fn_fast":
+        options["dtype"] = torch_dtype("float8_e4m3fn")
+        options["fp8_optimizations"] = True
+    elif weight_dtype == "fp8_e5m2":
+        options["dtype"] = torch_dtype("float8_e5m2")
+    path = resolve("diffusion_models", unet_name)
+    model = m["comfy"].sd.load_diffusion_model(path, model_options=options,
+                                               disable_dynamic=disable_dynamic)
+    print(f"unet: {unet_name}  vram {vram_gb():.1f} GB allocated")
+    return model
+
+
+def load_text_encoder(clip_name: str = CLIP, type: str = "minimax", device: str = "default"):
+    """CLIPLoader. type is the CLIPType name (minimax for H3's Qwen3-VL conditioner);
+    device: default | cpu - cpu keeps the 15 GB conditioner off the GPU."""
+    m = init_engine()
+    clip_type = getattr(m["comfy"].sd.CLIPType, type.upper(), m["comfy"].sd.CLIPType.STABLE_DIFFUSION)
+    options = {}
+    if device == "cpu":
+        d = torch.device("cpu")
+        options["load_device"] = options["offload_device"] = d
+    path = resolve("text_encoders", clip_name)
+    clip = m["comfy"].sd.load_clip(ckpt_paths=[path],
+                                   embedding_directory=m["folder_paths"].get_folder_paths("embeddings"),
+                                   clip_type=clip_type, model_options=options)
+    print(f"clip: {clip_name}  vram {vram_gb():.1f} GB allocated")
+    return clip
+
+
+def load_vae(vae_name: str = VAE_VIDEO):
+    """VAELoader - the same call for the video VAE and the audio VAE."""
+    m = init_engine()
+    path = resolve("vae", vae_name)
+    sd, metadata = m["comfy"].utils.load_torch_file(path, return_metadata=True)
+    vae = m["comfy"].sd.VAE(sd=sd, metadata=metadata)
+    vae.throw_exception_if_invalid()
+    print(f"vae: {vae_name}  vram {vram_gb():.1f} GB allocated")
+    return vae
+
+
+def load_lora(model, lora_name: str, strength_model: float = 1.0):
+    """LoraLoaderModelOnly. Returns a new patcher; the old one is still valid."""
+    m = init_engine()
+    path = resolve("loras", lora_name)
+    sd, metadata = m["comfy"].utils.load_torch_file(path, safe_load=True, return_metadata=True)
+    patched, _ = m["comfy"].sd.load_lora_for_models(model, None, sd, strength_model, 0,
+                                                    lora_metadata=metadata)
+    print(f"lora: {lora_name} x{strength_model}")
+    return patched
+
+
+# ---------------------------------------------------------------- model patches
+def sigma_shift(model, shift_video: float = 12.0, shift_audio: float = 3.0):
+    """MiniMaxH3SigmaShift. 12 / 3 are the shipped values; FastH3 templates use 10."""
+    from comfy_extras.nodes_minimax_h3 import MiniMaxH3SigmaShift
+    out = MiniMaxH3SigmaShift.execute(model=model, shift_video=shift_video, shift_audio=shift_audio)
+    return out.result[0] if hasattr(out, "result") else out[0]
+
+
+def attention_backend(model, backend: str = "comfy kitchen attention"):
+    """ModelAttentionBackend: 'comfy kitchen attention' (INT8) or 'pytorch attention'."""
+    from comfy_extras.nodes_model_advanced import ModelAttentionBackend
+    out = ModelAttentionBackend.execute(model=model, attention=backend)
+    return out.result[0] if hasattr(out, "result") else out[0]
+
+
+def sparse_attention(model, method: str = "sol-attn", tau: float = 1.3, keep_percent: float = 10.0,
+                     start_percent: float = 0.2, end_percent: float = 1.0, dense_blocks: str = "",
+                     min_tokens: int = 12288, sink_conditioning: str = "exact_kv_and_rows"):
+    """BlockSparseAttention. sol-attn works on any weights (tau trades speed for detail);
+    vsa needs FastH3 weights; sla needs an SLA-style LoRA."""
+    from comfy_extras.nodes_sparse_attention import apply_block_sparse_attention, parse_block_list
+    vsa = method == "vsa"
+    return apply_block_sparse_attention(
+        model, tau=float(tau),
+        topk_ratio=0.0 if method == "sol-attn" else float(keep_percent) / 100.0,
+        vsa=vsa, start_percent=start_percent, end_percent=end_percent, min_tokens=min_tokens,
+        dense_blocks=parse_block_list(dense_blocks), sink_conditioning=sink_conditioning,
+        extra_tokens=0 if vsa else 256, verbose=False)
+
+
+# ---------------------------------------------------------------------- memory
+def vram_gb() -> float:
+    import torch
+    return torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+
+
+def free(*objs, empty_cache: bool = True) -> None:
+    """Release specific components (pass the patcher / clip / vae you loaded)."""
+    init_engine(verbose=False)
+    mm = _M["comfy"].model_management
+    for obj in objs:
+        if obj is None:
+            continue
+        patcher = obj.patcher if hasattr(obj, "patcher") else obj
+        try:
+            mm.unload_model_and_clones(patcher)
+        except Exception:
+            pass
+    if empty_cache:
+        mm.soft_empty_cache()
+    print(f"freed {len(objs)} component(s)  vram {vram_gb():.1f} GB allocated")
+
+
+def free_all(empty_cache: bool = True) -> None:
+    """Release every loaded model. Each one re-stages from disk on next use."""
+    init_engine(verbose=False)
+    mm = _M["comfy"].model_management
+    mm.unload_all_models()
+    if empty_cache:
+        mm.soft_empty_cache()
+    print(f"freed all  vram {vram_gb():.1f} GB allocated")
+
+
+def status() -> None:
+    init_engine(verbose=False)
+    mm = _M["comfy"].model_management
+    print(f"dynamic_vram={_M['dynamic_vram']}  aimdo={_M['comfy'].memory_management.aimdo_enabled}  "
+          f"allocated={vram_gb():.2f} GB  loaded={[type(m.model).__name__ for m in mm.current_loaded_models]}")
+
+
+def torch_dtype(name: str):
+    import torch
+    return getattr(torch, name)
+
+
+import torch  # noqa: E402  (after init_engine's own import; only used by helpers)

@@ -9,6 +9,7 @@ Current contents:
 | Path | What it is |
 |---|---|
 | `moss_image/` | MOSS-Image-SFT through **diffusers** (pipeline vendored from the official model definition; see `moss_image/README.md` for the model-level detail) |
+| `minimax_h3/` | MiniMax H3 (video + native audio) driven from Python by importing **ComfyUI's core modules in-process** — no server and no workflow JSON, but the same engine: INT8 ConvRot kernels, DynamicVRAM staging, sparse attention. One loader per component; see `minimax_h3/README.md` |
 | `setup.sh` | one-command environment setup — see below |
 | `requirements.txt` | the hand-maintained dependency list (what to install) |
 | `requirements.lock.txt` | generated exact freeze of the working `.venv` (what was installed) |

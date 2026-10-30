@@ -25,3 +25,24 @@ protobuf>=5
 PyYAML>=6
 tqdm>=4.66
 regex>=2024.5
+
+# MiniMax H3, driven through ComfyUI's core modules imported in-process (minimax_h3/).
+# Both are abi3 wheels, so they install on this venv's CPython 3.13 even though ComfyUI
+# itself runs on 3.12. comfy-aimdo is what switches on DynamicVRAM - weights stay as file
+# slices and stream to the GPU layer by layer, which is why a 32 GB transformer "loads" in
+# 0.2 s and why the video VAE still has room to decode. comfy-kitchen supplies the INT8
+# ConvRot kernels the shipped H3 checkpoints are quantized with.
+comfy-aimdo>=0.6.0
+comfy-kitchen>=0.2.40
+# comfy_extras.nodes_audio imports ComfyUI's server module, so the web stack comes along.
+aiohttp>=3.14
+yarl>=1.24
+# imported by the comfy package itself, or by the video mux in comfy_api
+av>=19
+einops>=0.8
+scipy>=1.18
+psutil>=7
+requests>=2
+filelock>=4
+torchsde>=0.2.6
+packaging>=24
