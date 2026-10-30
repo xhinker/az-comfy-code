@@ -46,3 +46,10 @@ requests>=2
 filelock>=4
 torchsde>=0.2.6
 packaging>=24
+
+# torchaudio is needed by the MiniMax H3 T8 custom-node pack (h3_t8.sampling / audio_ops),
+# which the fast-workflow conversion calls directly. It is deliberately NOT a normal entry:
+# the only cu132 build is 2.11.1, whose metadata pins torch==2.11.*, so installing it the
+# usual way silently downgrades the torch 2.15 stack above. Install it by hand instead:
+#   .venv/bin/python -m pip install --no-deps --only-binary :all: #       'torchaudio==2.11.1+cu132' --index-url https://download.pytorch.org/whl/cu132
+# Verified: imports and resamples correctly against torch 2.15.0+cu132.

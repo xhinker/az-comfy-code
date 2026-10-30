@@ -63,9 +63,19 @@ audio_vae = L.load_vae(AUDIO_VAE)
 
 # %% 6. optional patches - each returns a new patcher; the old one stays valid
 LORA = f"{COMFY}/models/loras/minimax_h3/minimax_h3_turbo_4step_ckpt850_pruned_comfyui.safetensors"
-# model = L.load_lora(model, LORA, 1.0)                                # then 4-8 steps is enough
-# model = L.sigma_shift(model, shift_video=10.0, shift_audio=10.0)    # FastH3 templates
-# model = L.sparse_attention(model, "sol-attn", tau=1.3, start_percent=0.2)   # ~1.7x, any weights
+model = L.load_lora(model, LORA, 1.0)                                # then 4-8 steps is enough
+# The shift is a training-consistency setting, not a taste dial: it has to match what the
+# weights were trained or distilled with. It moves where your steps land on the noise line
+# (sigma = s*t / (1 + (s-1)*t)) AND it is what the DiT uses to derive the audio stream's
+# noise level and per-stream timestep labels. Wrong audio shift = distorted or dead audio.
+#   released checkpoint, no LoRA .... 12.0 / 3.0   (ComfyUI's own default, applied anyway)
+#   this turbo LoRA (pruned conv.) .. 12.0 / 4-6   (drbaph card: "Video sigma shift 12, Audio sigma shift 4-6")
+#   FastH3 8-step template .......... 10.0 / 3.0
+SHIFT_VIDEO, SHIFT_AUDIO = 12.0, 5.0
+model = L.sigma_shift(model, shift_video=SHIFT_VIDEO, shift_audio=SHIFT_AUDIO)
+_to = model.model_options["transformer_options"]
+print("sigma shift in effect:", _to["minimax_h3_sigma_shift_video"], "/", _to["minimax_h3_sigma_shift_audio"])
+model = L.sparse_attention(model, "sol-attn", tau=1.3, start_percent=0.2)   # ~1.7x, any weights
 
 
 # %% 7. prompt and geometry
@@ -75,7 +85,7 @@ LORA = f"{COMFY}/models/loras/minimax_h3/minimax_h3_turbo_4step_ckpt850_pruned_c
 # Off-grid values snap up - asking for 62 gives 73.
 PROMPT = ("A red fox trotting through a snowy pine forest, snow crunching underfoot, "
           "wind through the branches, shallow depth of field")
-MODE, WIDTH, HEIGHT, LENGTH = "t2v", 1344, 768, 62
+MODE, WIDTH, HEIGHT, LENGTH = "t2v", 1344, 768, 226
 
 # other modes (uncomment one; references are tagged <Picture 1>, <Picture 2>, ... in the
 # prompt, in the same order as the files):
@@ -93,10 +103,10 @@ L.status()          # the conditioner releases here; the transformer gets the ro
 # STEPS MATTER. The released checkpoint is guidance-distilled but still wants ~20 steps;
 # 4 steps gives a soft, smeared frame that looks like a bad VAE. With the turbo LoRA from
 # cell 6, 4-8 steps is enough. ~3 it/s at 832x480 on a 5090, ~5.2 s/it at 1344x768.
-STEPS, SEED = 20, 7
+STEPS, SEED = 8, 10
 
 out = H.denoise(model, cond, latent, steps=STEPS, seed=SEED)
-mp4 = H.decode(vae, audio_vae, out, H.OUT_DIR / f"interactive_{WIDTH}x{HEIGHT}_{SEED}.mp4")
+mp4 = H.decode(vae, audio_vae, out, H.out_dir_for(__file__) / f"interactive_{WIDTH}x{HEIGHT}_{SEED}.mp4")
 print(f"-> {mp4}")
 
 

@@ -93,6 +93,16 @@ def init_engine(verbose: bool = True, vram_headroom_gb: float = 0.0, devices=Non
         aimdo_headroom = None if args.reserve_vram is None else int(args.reserve_vram * 1024 ** 3)
         aimdo_ready = aimdo.init(simple_vram_headroom=aimdo_headroom,
                                  nvml_pressure=not args.disable_nvml_pressure)
+        # host_buffer / vram_buffer snapshot `lib = control.lib` at import time. If anything
+        # pulled them in before init() ran - importing ComfyUI's `server` module does exactly
+        # that - they keep lib=None and every staged load dies later inside
+        # register_load_device with 'NoneType' has no attribute 'hostbuf_allocate'. Re-bind.
+        for _name in ("host_buffer", "vram_buffer"):
+            _mod = sys.modules.get(f"comfy_aimdo.{_name}")
+            if _mod is not None and getattr(_mod, "lib", None) is None:
+                _mod.lib = aimdo.lib
+                if verbose:
+                    logging.info(f"re-bound comfy_aimdo.{_name}.lib (it was imported before init)")
         import comfy.memory_management
         import comfy.model_management
         import comfy.model_patcher
@@ -217,7 +227,14 @@ def load_lora(model, lora_name: str, strength_model: float = 1.0):
 
 # ---------------------------------------------------------------- model patches
 def sigma_shift(model, shift_video: float = 12.0, shift_audio: float = 3.0):
-    """MiniMaxH3SigmaShift. 12 / 3 are the shipped values; FastH3 templates use 10."""
+    """MiniMaxH3SigmaShift - retarget the flow schedule the sampler walks.
+
+    12.0 / 3.0 are what the released checkpoint was trained with; the FastH3 template
+    patches 10.0 / 3.0 for its 8-step distilled run. shift_video drives the sigma grid
+    (sigma = s*t / (1 + (s-1)*t)); both values also reach the DiT, which derives the
+    audio schedule and the per-stream timestep labels from them. Not a quality dial -
+    only set it when a LoRA or template says the shift differs.
+    """
     from comfy_extras.nodes_minimax_h3 import MiniMaxH3SigmaShift
     out = MiniMaxH3SigmaShift.execute(model=model, shift_video=shift_video, shift_audio=shift_audio)
     return out.result[0] if hasattr(out, "result") else out[0]

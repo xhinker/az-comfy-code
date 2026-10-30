@@ -34,6 +34,19 @@ from h3_load import (UNET, CLIP, VAE_VIDEO, VAE_AUDIO, free, free_all, load_diff
 
 OUT_DIR = BASE / "outputs"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def out_dir_for(script: str) -> pathlib.Path:
+    """outputs/<the .py that generated it>/ - one folder per generator, created on demand.
+
+    Pass __file__. A kernel with no __file__ falls back to outputs/ itself.
+    """
+    stem = pathlib.Path(script).stem if script else ""
+    d = OUT_DIR / stem if stem else OUT_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 SHIFT_DEFAULT = (12.0, 3.0)
 
 
@@ -223,7 +236,7 @@ def main() -> None:
                       scheduler=a.scheduler, seed=seed)
         t_sample = time.time() - t0
         t1 = time.time()
-        dst = decode(vae, audio_vae, out, OUT_DIR / f"{a.name or 'h3_' + str(seed)}.mp4",
+        dst = decode(vae, audio_vae, out, out_dir_for(__file__) / f"{a.name or 'h3_' + str(seed)}.mp4",
                      tile_size=(a.tile_vae or None))
         print(f"seed {seed}: sample {t_sample:6.1f}s + decode {time.time() - t1:5.1f}s -> {dst}")
 

@@ -23,7 +23,10 @@ are ComfyUI-side.
 | `h3_load.py` | the DynamicVRAM bootstrap and one loader per component; VRAM helpers |
 | `h3_core.py` | the four stages (encode / denoise / decode) over those components; also a CLI |
 | `h3_core_interactive.py` | `# %%` cells, one component per cell - the notebook path |
+Outputs land in `outputs/<script name>/` — one subfolder per generator (`h3_core/`, `h3_core_interactive/`, `minimax_h3_fast_test/`), through `h3_core.out_dir_for(__file__)`.
+
 | `run_example.sh` | seven worked CLI commands, cheap smoke test first |
+| `minimax_h3_fast_test.py` | `minimax_h3_5s_fast.json` (the ComfyUI workflow) converted to cells: 4-LoRA chain, T8 dual-clock sampler, sol-attn, AV decode |
 | `outputs/` | generated mp4s (git-ignored) |
 
 ## Prerequisites
@@ -74,7 +77,7 @@ absolute path or a name relative to ComfyUI's model folders. Load one at a time.
 | `load_text_encoder()` | CLIPLoader | `clip_name`, `type="minimax"`, `device` (default / cpu) |
 | `load_vae()` | VAELoader | `vae_name` - the same call for the video and the audio VAE |
 | `load_lora(model, ...)` | LoraLoaderModelOnly | `lora_name`, `strength_model` |
-| `sigma_shift()` | MiniMaxH3SigmaShift | `shift_video`, `shift_audio` (12 / 3 shipped, 10 / 10 FastH3) |
+| `sigma_shift()` | MiniMaxH3SigmaShift | `shift_video`, `shift_audio` (12.0 / 3.0 as trained; the FastH3 template uses 10.0 / 3.0) |
 | `attention_backend()` | ModelAttentionBackend | `comfy kitchen attention` (INT8) or `pytorch attention` |
 | `sparse_attention()` | BlockSparseAttention | `method` (sol-attn / vsa / sla), `tau`, `keep_percent`, `start_percent`, `end_percent`, `dense_blocks`, `min_tokens`, `sink_conditioning` |
 | `free() / free_all() / status() / vram_gb()` | - | release components, print what is resident |
@@ -137,3 +140,34 @@ is inherently soft no matter what the sampler does. `length` snaps to the 17k+5 
 - `status()` after loading everything: `allocated=0.00 GB`, `loaded=[]`.
 - `ffprobe` the mp4: expect `h264` video plus `aac` at 32 kHz (the audio comes from the same
   denoising pass), and a frame count on the 17k+5 grid.
+
+
+## The fast-workflow conversion (`minimax_h3_fast_test.py`)
+
+Reproduces `ComfyUI/user/default/workflows/minimax_h3/minimax_h3_5s_fast.json` by calling the
+same node implementations the server calls - including the third-party ones:
+
+| workflow node | in-process call |
+|---|---|
+| UNETLoader (pruned int8 convrot base) | `h3_load.load_diffusion_model` |
+| LoraLoaderModelOnly x4 (0.75 / 0.75 / 0.35 / 0.5) | `h3_load.load_lora`, chained |
+| SolAttnMiniMax (T8 pack) | `sol_attn_minimax_v2.SolAttnMiniMax.execute` |
+| MiniMaxH3DualClockSamplerT8 | `h3_t8.sampling.setup_dual_clock_sampling` -> model, sampler, sigmas |
+| BasicGuider + SamplerCustomAdvanced | `Guider_Basic` + `guider.sample()` |
+| MiniMaxH3AVDecodeT8 | `h3_t8.audio_ops.decode_av_latent` |
+| CreateVideo + SaveVideo | `comfy_api` `VideoFromComponents.save_to` |
+
+Two deviations, both forced by the environment rather than the graph:
+
+- **`MiniMaxH3MemoryEfficientSageAttentionPatch` (KJ nodes) is off by default.** It needs
+  sageattention >= 2.2, which is not on PyPI (it stops at 1.0.6) and ships as prebuilt CUDA
+  wheels; ComfyUI's own venv has 2.2.0, this project venv does not. It is a memory
+  optimization - the graph sets the attention backend to pytorch right after it and sol-attn
+  overrides the attention call anyway. Flip `SAGE_PATCH = True` if you install it.
+- **`torchaudio` is a manual install** (see `requirements.txt`): the T8 pack imports it, and
+  the only cu132 build would otherwise downgrade torch.
+
+Measured, at the workflow's own 768x1344 x 226 frames, 8 steps: ~10 s/it after warm-up,
+9.42 s out, h264 + aac stereo 32 kHz, audio peak -8.9 dBFS. Sol-attn logs
+`chaining onto an existing attention override`, and the dual-clock schedule comes out as
+`1.0 0.988 0.973 0.952 0.923 0.878 0.8 0.632 0.0`.
