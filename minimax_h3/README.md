@@ -162,8 +162,15 @@ latent shape and token count, which is what sol-attn's `min_tokens` gate keys of
 snaps up to the model's `17k+5` frame grid on the way in (126 -> 141 frames), so the printed
 latent depth is the real one, not the one you asked for.
 
+Duration works the same way - set seconds and the frame count stops mattering. H3 only
+accepts frame counts on its `17k+5` grid at 24 fps (5, 22, 39, ... 124, 141, spaced 17 frames
+= 0.71 s apart). ComfyUI's `align_frame_count` always rounds **up**, which for a duration
+input means 1.0 s becomes 1.62 s; `frames_for` picks the **nearest** grid point instead and
+prints the snap, plus a note when you leave the trained ~124-362 frame (5-15 s) range.
+
 ```python
-LONG_SIDE = 1344
+SECONDS = 5.0        # overrides LENGTH when set
+LENGTH = H.frames_for(SECONDS)          # -> 124 frames = 5.17s
 WIDTH, HEIGHT = H.fit_size(FIRST_FRAME, LONG_SIDE, length=LENGTH)
 # fit_size: image 896x1440 (ratio 28:45) -> canvas 768x1280, 983040 px (cap 1032192)
 #           | latent 42x80x48 = 161280 voxels, 40320 tokens after 2x2 patchify

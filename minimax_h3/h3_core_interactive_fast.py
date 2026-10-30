@@ -67,7 +67,6 @@ TE_GPU, VAE_GPU = (2, 2)
 SUPPORT_KEEP = True
 
 # the reference and the prompt this test borrows from the saved fast workflow
-FIRST_FRAME = f"{COMFY}/input/output_seed_1422.png"
 WORKFLOW = COMFY / "user/default/workflows/minimax_h3/minimax_h3_5s_fast.json"
 
 for _p in (UNET, CLIP, VAE, AUDIO_VAE, FIRST_FRAME, WORKFLOW):
@@ -146,13 +145,20 @@ def workflow_prompt(path=WORKFLOW, node_type="MiniMaxH3ImageToVideo"):
 
 STEPS = 8
 PROMPT = workflow_prompt()
+
+FIRST_FRAME = "/home/andrewzhu/storage_8t_4/comfyui_output/output/WanVideo_SCAIL_00016.png"
 MODE, IMAGE = "i2v", FIRST_FRAME
 # matched to minimax_h3_fast_t8.py so the two are directly comparable
-LENGTH = 126
+LENGTH = 126        # frame count - the fallback, used only when SECONDS is None
+SECONDS = 7.0       # duration in seconds; when this is set it overrides LENGTH
 SAMPLER, SCHEDULER = "res_multistep", "simple"      # what h3_core_interactive.py uses
 # SAMPLER, SCHEDULER = "euler", "beta"              # one evaluation per step, like the workflow
 
 import h3_core as H
+
+# seconds wins over the frame count, and snaps up to H3's 17k+5 grid (5.0s -> 124 frames)
+if SECONDS is not None:
+    LENGTH = H.frames_for(SECONDS)
 
 # The long side is the only size setting; the short side follows the first frame's aspect
 # ratio. H3 needs both axes to be multiples of 32 (16x VAE compression x the 2x2 patchify)
@@ -161,7 +167,8 @@ import h3_core as H
 # LONG_SIDE = None defers to ComfyUI's own adapt_canvas, which fixes the SHORT edge at 768.
 LONG_SIDE = 1280
 WIDTH, HEIGHT = H.fit_size(IMAGE, LONG_SIDE, length=LENGTH)
-print(f"prompt {len(PROMPT)} chars | {WIDTH}x{HEIGHT} x {LENGTH} | {STEPS} steps | {SAMPLER}+{SCHEDULER}")
+print(f"prompt {len(PROMPT)} chars | {WIDTH}x{HEIGHT} x {LENGTH} frames "
+      f"({H.duration_of(LENGTH):.2f}s) | {STEPS} steps | {SAMPLER}+{SCHEDULER}")
 
 _t = time.perf_counter()
 cond, latent = H.encode(clip, vae, PROMPT, mode=MODE, width=WIDTH, height=HEIGHT,
@@ -173,30 +180,31 @@ L.status()
 
 # %% 8. generate - timed per stage
 
-SEED = 65
-_t = time.perf_counter()
-out = H.denoise(model, cond, latent, steps=STEPS, sampler=SAMPLER, scheduler=SCHEDULER, seed=SEED)
-SAMPLE_S = time.perf_counter() - _t
+for i in range(3):
+    SEED = 68+i
+    _t = time.perf_counter()
+    out = H.denoise(model, cond, latent, steps=STEPS, sampler=SAMPLER, scheduler=SCHEDULER, seed=SEED)
+    SAMPLE_S = time.perf_counter() - _t
 
-_t = time.perf_counter()
-mp4 = H.decode(vae, audio_vae, out,
-               H.out_dir_for(__file__) / f"interactive_fast_{WIDTH}x{HEIGHT}_{SEED}.mp4")
-DECODE_S = time.perf_counter() - _t
+    _t = time.perf_counter()
+    mp4 = H.decode(vae, audio_vae, out,
+                H.out_dir_for(__file__) / f"interactive_fast_{WIDTH}x{HEIGHT}_{SEED}.mp4")
+    DECODE_S = time.perf_counter() - _t
 
-print(f"sample  {SAMPLE_S:6.1f}s  ({SAMPLE_S / STEPS:.2f}s per step)")
-print(f"decode  {DECODE_S:6.1f}s")
-print(f"total   {ENCODE_S + SAMPLE_S + DECODE_S:6.1f}s")
-print(f"-> {mp4}")
-# Measured: switching res_multistep+simple for euler+beta changed nothing outside noise, and
-# four LoRAs cost nothing measurable at load or per step. Sparse attention is the ~2.3x.
-#
-# Keeping things loaded does not remove the warm-up either. h3_core's stages call
-# free(clip)/free_all() between themselves (release=True); passing release=False keeps them
-# loaded and a second generation in the same process still pays it: 106.6 s then 103.6 s,
-# first two steps ~20 s against 10.4 s steady. The working set (20 GB weights + 15 GB
-# conditioner + VAEs) is larger than the 32 GB card, so VBAR re-faults weights each pass.
-# That ~40 s is fixed per generation - it amortizes with more steps or a longer clip, and
-# only disappears if the weights actually fit, which resident=True cannot manage here.
+    print(f"sample  {SAMPLE_S:6.1f}s  ({SAMPLE_S / STEPS:.2f}s per step)")
+    print(f"decode  {DECODE_S:6.1f}s")
+    print(f"total   {ENCODE_S + SAMPLE_S + DECODE_S:6.1f}s")
+    print(f"-> {mp4}")
+    # Measured: switching res_multistep+simple for euler+beta changed nothing outside noise, and
+    # four LoRAs cost nothing measurable at load or per step. Sparse attention is the ~2.3x.
+    #
+    # Keeping things loaded does not remove the warm-up either. h3_core's stages call
+    # free(clip)/free_all() between themselves (release=True); passing release=False keeps them
+    # loaded and a second generation in the same process still pays it: 106.6 s then 103.6 s,
+    # first two steps ~20 s against 10.4 s steady. The working set (20 GB weights + 15 GB
+    # conditioner + VAEs) is larger than the 32 GB card, so VBAR re-faults weights each pass.
+    # That ~40 s is fixed per generation - it amortizes with more steps or a longer clip, and
+    # only disappears if the weights actually fit, which resident=True cannot manage here.
 
 
 # %% 9. VRAM - what is resident now, and how to hand it back

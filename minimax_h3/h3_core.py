@@ -73,6 +73,39 @@ def image_size(path):
         return im.width, im.height
 
 
+def frames_for(seconds: float, *, verbose: bool = True) -> int:
+    """Frame count for a duration in seconds, snapped to H3's frame grid.
+
+    H3 only accepts frame counts on the 17k+5 grid at FPS=24: 5, 22, 39, ... 124, 141,
+    spaced 17 frames (0.71 s) apart. align_frame_count() in comfy_extras/nodes_minimax_h3.py
+    always rounds *up*, which is wrong for a duration input - 1.0 s would become 39 frames
+    (1.62 s), a 62% overshoot. This picks the nearest grid point instead, never below 5, and
+    reports the snap because the real clip is not exactly what you asked for.
+
+    The node's own tooltip puts the trained range at ~124-362 frames (~5-15 s); shorter and
+    longer work but are outside what the checkpoint saw, so that gets a note too.
+    """
+    L.init_engine(verbose=False)      # comfy_extras is only importable once the engine is up
+    from comfy_extras.nodes_minimax_h3 import FPS
+    raw = max(5, int(round(seconds * FPS)))
+    lo = max(5, raw - ((raw - 5) % 17))          # largest grid value <= raw
+    hi = lo if lo == raw else lo + 17
+    frames = lo if (raw - lo) <= (hi - raw) else hi
+    if verbose and frames != raw:
+        print(f"frames_for: {seconds:g}s = {raw} frames, H3's grid is 17k+5 "
+              f"-> nearest {frames} frames = {frames / FPS:.2f}s")
+    if verbose and not (124 <= frames <= 362):
+        print(f"frames_for: {frames} frames is outside H3's trained ~124-362 (5-15s) range")
+    return frames
+
+
+def duration_of(frames: int) -> float:
+    """Seconds a frame count actually decodes to, after the grid snap."""
+    L.init_engine(verbose=False)
+    from comfy_extras.nodes_minimax_h3 import FPS
+    return frames / FPS
+
+
 def fit_size(image, long_side: int | None = None, *, length: int | None = None,
              verbose: bool = True):
     """Pick the H3 canvas from the source image: long side is the setting, short side follows.
@@ -90,6 +123,7 @@ def fit_size(image, long_side: int | None = None, *, length: int | None = None,
 
     Returns (width, height) in the image's own orientation.
     """
+    L.init_engine(verbose=False)
     from comfy_extras.nodes_minimax_h3 import CANVAS_MULTIPLE, MAX_PIXELS, adapt_canvas, \
         align_frame_count, video_latent_t
 
