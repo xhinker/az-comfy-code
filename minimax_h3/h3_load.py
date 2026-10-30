@@ -292,6 +292,38 @@ def sparse_attention(model, method: str = "sol-attn", tau: float = 1.3, keep_per
 
 
 # ---------------------------------------------------------------------- memory
+def sol_attn_t8(model, tau: float = 1.3, start_percent: float = 0.2, end_percent: float = 0.9,
+                min_tokens: int = 12288, sink_conditioning: str = "exact_kv_and_rows",
+                morton: bool = False, morton_curve: str = "2d_frame", dense_blocks: str = "",
+                centroid_tail: bool = True, reuse_qkv_memory: bool = False,
+                routed_cap_percent: int = 0, tau_profile=None, verbose: bool = False,
+                t8_dir: str = ""):
+    """SolAttnMiniMax from the comfyui-minimax-h3-audio-T8 pack - Triton kernels built for
+    SM120. Same job as sparse_attention()'s ComfyUI-native BlockSparseAttention: pick one or
+    the other, never both. Measured on this box at 768x1344 x 226: 10.06 s/it here vs 10.15
+    s/it native, so treat it as a knob for tau/end_percent coverage, not as a speed win.
+    Needs the T8 pack installed and comfy_kitchen exposing sol_attn."""
+    import importlib.util
+    root = pathlib.Path(t8_dir or f"{COMFY}/custom_nodes/comfyui-minimax-h3-audio-T8")
+    path = root / "sol_attn_minimax_v2.py"
+    if not path.is_file():
+        raise FileNotFoundError(f"T8 sol-attn module not found at {path}")
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))            # the module lives at the pack root
+    spec = importlib.util.spec_from_file_location("sol_attn_minimax_v2", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    out = mod.SolAttnMiniMax.execute(
+        model, tau=float(tau), start_percent=float(start_percent), end_percent=float(end_percent),
+        min_tokens=int(min_tokens), sink_conditioning=sink_conditioning, morton=morton,
+        morton_curve=morton_curve, dense_blocks=dense_blocks, verbose=verbose,
+        tau_profile=tau_profile, routed_cap_percent=routed_cap_percent,
+        centroid_tail=centroid_tail, reuse_qkv_memory=reuse_qkv_memory)
+    print(f"sol-attn (T8 Triton): tau={tau} steps {start_percent}-{end_percent} min_tokens={min_tokens}")
+    return out.result[0] if hasattr(out, "result") else out[0]
+
+
 def vram_gb() -> float:
     import torch
     return torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0

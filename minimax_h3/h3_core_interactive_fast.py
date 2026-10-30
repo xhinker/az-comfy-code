@@ -30,13 +30,13 @@ BASE = pathlib.Path(__file__).resolve().parent if "__file__" in globals() else p
 sys.path.insert(0, str(BASE))
 
 
-## %% 1. model files - identical to h3_core_interactive.py
+# %% 1. model files - identical to h3_core_interactive.py
 COMFY = pathlib.Path("/mnt/data_2t_3/github_repos/ComfyUI")
 
-UNET = f"{COMFY}/models/diffusion_models/minimax_h3/MiniMax-H3-Ref2VA_int8_convrot.safetensors"
-CLIP = f"{COMFY}/models/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
-VAE = f"{COMFY}/models/vae/minimax_h3/minimax_h3_video_vae_int8_convrot.safetensors"
-AUDIO_VAE = f"{COMFY}/models/vae/minimax_h3_audio_vae_fp32.safetensors"
+UNET        = f"{COMFY}/models/diffusion_models/minimax_h3/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+CLIP        = f"{COMFY}/models/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+VAE         = f"{COMFY}/models/vae/minimax_h3/minimax_h3_video_vae_int8_convrot.safetensors"
+AUDIO_VAE   = f"{COMFY}/models/vae/minimax_h3_audio_vae_fp32.safetensors"
 
 # the reference and the prompt this test borrows from the saved fast workflow
 FIRST_FRAME = f"{COMFY}/input/output_seed_1422.png"
@@ -64,17 +64,17 @@ L.init_engine(verbose=True)
 L.status()          # want dynamic_vram=True aimdo=True; if False, nothing downstream fits
 
 
-## %% 3. the transformer  (UNETLoader)  ~0.2s
+# %% 3. the transformer  (UNETLoader)  ~0.2s
 model = L.load_diffusion_model(UNET, weight_dtype="default")
 L.status()
 
 
-## %% 4. the text encoder  (CLIPLoader)  ~2s
+# %% 4. the text encoder  (CLIPLoader)  ~2s
 clip = L.load_text_encoder(CLIP, type="minimax", device="default")
 L.status()
 
 
-## %% 5. the VAEs  (VAELoader)  ~0.1s each
+# %% 5. the VAEs  (VAELoader)  ~0.1s each
 vae = L.load_vae(VAE)
 audio_vae = L.load_vae(AUDIO_VAE)
 
@@ -95,8 +95,13 @@ model = L.sigma_shift(model, shift_video=SHIFT_VIDEO, shift_audio=SHIFT_AUDIO)
 # first and sol-attn chains onto the result, so keep this above the sparse-attention cell.
 model = L.sage_attention_patch(model)
 
-#%%
-model = L.sparse_attention(model, "sol-attn", tau=1.3, start_percent=0.2)
+##%% sparse attention - two interchangeable implementations, pick one
+# T8 SolAttnMiniMax: Triton kernels built for SM120, same tau/start the workflow uses.
+model = L.sol_attn_t8(model, tau=1.3, start_percent=0.2, end_percent=0.9, min_tokens=12288)
+# ComfyUI's own BlockSparseAttention: measured 10.15 s/it here vs 10.06 for T8 at the same
+# base and LoRA chain, so this swap is not where speed comes from. end_percent is the dial
+# that is: 0.9 leaves the last 10% of steps dense, 1.0 covers every step.
+# model = L.sparse_attention(model, "sol-attn", tau=1.3, start_percent=0.2)
 
 
 # %% 7. prompt and geometry - taken from the fast workflow, not rewritten here
