@@ -205,8 +205,31 @@ def encode(clip, vae, prompt: str, *, mode: str = "t2v", width: int = 1344, heig
 
 
 # --------------------------------------------------------------------------- stage 3
+def flex_sigmas(knots=(1000, 750, 500, 250, 100, 40, 0), shift_video: float = 12.0,
+                verbose: bool = True):
+    """Sampler sigmas for the Pika H3 Flex six-NFE contract.
+
+    The Flex card gives knots 1000/750/500/250/100/40/0 on the model's 0-1000 base grid and
+    warns that "simply choosing six steps in a generic sampler does not reproduce that
+    contract". ComfyUI's ModelSamplingDiscreteFlow builds its own sigma table the same way:
+    sigma = time_snr_shift(shift, t / multiplier) with time_snr_shift(a, t) = a*t/(1+(a-1)*t).
+    So the knots are base timesteps and the shift turns them into the sigmas the sampler
+    walks. At shift 12 that is a front-loaded grid - 1.0, 0.973, 0.923, 0.8, 0.571, 0.333, 0 -
+    which is what a distilled few-step model expects, and nothing like the even grid a
+    6-step "simple" scheduler produces.
+    """
+    L.init_engine(verbose=False)
+    import torch
+    from comfy.model_sampling import time_snr_shift
+    sigmas = [float(time_snr_shift(shift_video, t / 1000.0)) for t in knots]
+    if verbose:
+        print("flex_sigmas: knots " + "/".join(str(t) for t in knots) +
+              f" at shift {shift_video:g} -> " + ", ".join(f"{x:.4f}" for x in sigmas))
+    return torch.tensor(sigmas, dtype=torch.float32)
+
+
 def denoise(model, cond, latent, *, steps: int = 20, sampler: str = "res_multistep",
-            scheduler: str = "simple", seed: int = 7, release: bool = True):
+            scheduler: str = "simple", seed: int = 7, release: bool = True, sigmas=None):
     """BasicGuider + BasicScheduler + RandomNoise + SamplerCustomAdvanced, in one call.
 
     cfg is fixed at 1.0 by construction: comfy.samplers.sample() insists on a negative
@@ -222,7 +245,13 @@ def denoise(model, cond, latent, *, steps: int = 20, sampler: str = "res_multist
     latent = dict(latent)
     latent["samples"] = comfy.sample.fix_empty_latent_channels(model, latent["samples"])
     noise = Noise_RandomNoise(seed).generate_noise(latent)
-    sigmas = comfy.samplers.calculate_sigmas(model.get_model_object("model_sampling"), scheduler, steps)
+    if sigmas is None:
+        sigmas = comfy.samplers.calculate_sigmas(model.get_model_object("model_sampling"),
+                                                 scheduler, steps)
+    else:
+        # an explicit schedule (e.g. flex_sigmas) - the scheduler name is then unused, and
+        # steps is whatever the knot list implies
+        steps = len(sigmas) - 1
     guider = Guider_Basic(model)
     guider.set_conds(cond)
     out = dict(latent)

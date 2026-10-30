@@ -69,19 +69,41 @@ SUPPORT_KEEP = True
 # the reference and the prompt this test borrows from the saved fast workflow
 WORKFLOW = COMFY / "user/default/workflows/minimax_h3/minimax_h3_5s_fast.json"
 
-for _p in (UNET, CLIP, VAE, AUDIO_VAE, FIRST_FRAME, WORKFLOW):
+for _p in (UNET, CLIP, VAE, AUDIO_VAE, WORKFLOW):
     print("OK      " if pathlib.Path(_p).is_file() else "MISSING ", _p)
 
 
 # (name, strength) in the order the workflow chains them - strength matters as much as order
-LORAS = [
-    (f"{COMFY}/models/loras/minimax_h3/minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors", 0.75),
-    (f"{COMFY}/models/loras/minimax_h3/minimax_h3_fl2v_turbo_8step_v1.0_768p_FeiHouRemix_v0.6_compat_v001_T8.safetensors", 0.75),
+PIKA_FLEX = f"{COMFY}/models/loras/minimax_h3/pika_h3_flex_fl2va_comfy_bf16.safetensors"
+# pika_h3_flex_ref2va_comfy_bf16.safetensors is the same adapter for the Ref2VA base - this
+# UNET is fl2va, so the fl2va file is the one that matches.
+
+# FLEX swaps the step-distillation adapter, it does not add a third one: the two turbo
+# adapters and Pika Flex are all doing the same job (teaching the model to take few steps),
+# so stacking them fights. Pika Flex is BF16 rank 128 (fused QKV rank 384), 416 tensors,
+# the same 12 module key patterns as the turbo pruned LoRA and no adaln pairs, so it lands
+# on the pruned fl2va layout. Card: use model strength 1.0 - the conversion preserves unit
+# scaling and ships no alpha tensors.
+FLEX = True
+
+DISTILL = ([(PIKA_FLEX, 1.0)] if FLEX else
+           [(f"{COMFY}/models/loras/minimax_h3/minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors", 0.75),
+            (f"{COMFY}/models/loras/minimax_h3/minimax_h3_fl2v_turbo_8step_v1.0_768p_FeiHouRemix_v0.6_compat_v001_T8.safetensors", 0.75)])
+# Style/motion adapters are a different category from acceleration adapters, so they are not
+# forbidden the way a second turbo is. Their own metadata says they were trained on the plain
+# H3 base at the same schedule Flex uses - h3_musubi_v4 carries ss_h3_shift_video 12.0,
+# ss_h3_shift_audio 3.0, uniform timestep sampling, rank 16/alpha 16; SoftBreastMotion is
+# rank 32 on MiniMax-H3. So nothing conflicts. The one thing to expect: 0.35 and 0.5 were
+# tuned for the 8-step turbo chain, and at six steps content LoRAs read stronger.
+# Set False for the single-adapter config the official template actually verifies.
+CONTENT_ON_FLEX = True
+CONTENT = [] if (FLEX and not CONTENT_ON_FLEX) else [
     (f"{COMFY}/models/loras/minimax_h3/h3_musubi_v4-000040.safetensors", 0.35),
     (f"{COMFY}/models/loras/minimax_h3/SoftBreastMotion.safetensors", 0.5),
 ]
+LORAS = DISTILL + CONTENT
 
-for _p in [UNET, CLIP, VAE, AUDIO_VAE, FIRST_FRAME, WORKFLOW, *[p for p, _ in LORAS]]:
+for _p in [UNET, CLIP, VAE, AUDIO_VAE, WORKFLOW, *[p for p, _ in LORAS]]:
     print("OK      " if pathlib.Path(_p).is_file() else "MISSING ", _p)
 
 # %% 2. engine - must run before any model touches CUDA; switches on DynamicVRAM
@@ -115,7 +137,9 @@ L.status()
 
 
 # %% shift
-SHIFT_VIDEO, SHIFT_AUDIO = 12.0, 5.0     # drbaph card for this pruned turbo conversion: 12 / 4-6
+# Flex card: video shift 12, audio shift 3. The turbo chain card says 12 / 4-6, which is
+# what 5.0 is for - keep the pair with the adapter, not as a taste dial.
+SHIFT_VIDEO, SHIFT_AUDIO = (12.0, 3.0) if FLEX else (12.0, 5.0)
 model = L.sigma_shift(model, shift_video=SHIFT_VIDEO, shift_audio=SHIFT_AUDIO)
 
 ## %% memory-efficient attention (KJ nodes) - int8 QK / fp8 V, lowers peak VRAM.
@@ -143,7 +167,7 @@ def workflow_prompt(path=WORKFLOW, node_type="MiniMaxH3ImageToVideo"):
             return n["widgets_values"][0]
     raise KeyError(node_type)
 
-STEPS = 8
+STEPS = 6 if FLEX else 8      # Flex is a six-NFE adapter
 PROMPT = workflow_prompt()
 
 FIRST_FRAME = "/home/andrewzhu/storage_8t_4/comfyui_output/output/WanVideo_SCAIL_00016.png"
@@ -151,7 +175,10 @@ MODE, IMAGE = "i2v", FIRST_FRAME
 # matched to minimax_h3_fast_t8.py so the two are directly comparable
 LENGTH = 126        # frame count - the fallback, used only when SECONDS is None
 SECONDS = 7.0       # duration in seconds; when this is set it overrides LENGTH
-SAMPLER, SCHEDULER = "res_multistep", "simple"      # what h3_core_interactive.py uses
+# The official Flex template (video_pika_h3_flex_fl2va.json) uses KSamplerSelect=lcm with
+# ManualSigmas and BasicGuider (CFG 1.0). lcm is the sampler that injects the contract's
+# "fresh intermediate noise"; SCHEDULER is ignored once SIGMAS is set below.
+SAMPLER, SCHEDULER = ("lcm", "simple") if FLEX else ("res_multistep", "simple")
 # SAMPLER, SCHEDULER = "euler", "beta"              # one evaluation per step, like the workflow
 
 import h3_core as H
@@ -181,9 +208,14 @@ L.status()
 # %% 8. generate - timed per stage
 
 for i in range(3):
-    SEED = 68+i
+    SEED = 73+i
     _t = time.perf_counter()
-    out = H.denoise(model, cond, latent, steps=STEPS, sampler=SAMPLER, scheduler=SCHEDULER, seed=SEED)
+    # The six-NFE schedule. flex_sigmas reproduces the template's ManualSigmas string
+    # exactly: "1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0". Choosing 6 steps in
+    # a generic scheduler gives an even grid, not this one.
+    sigmas = H.flex_sigmas(shift_video=SHIFT_VIDEO) if FLEX else None
+    out = H.denoise(model, cond, latent, steps=STEPS, sampler=SAMPLER, scheduler=SCHEDULER,
+                    seed=SEED, sigmas=sigmas)
     SAMPLE_S = time.perf_counter() - _t
 
     _t = time.perf_counter()
