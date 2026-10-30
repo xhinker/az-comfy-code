@@ -73,7 +73,8 @@ absolute path or a name relative to ComfyUI's model folders. Load one at a time.
 
 | Call | Node | Parameters |
 |---|---|---|
-| `load_diffusion_model()` | UNETLoader | `unet_name`, `weight_dtype` (default / fp8_e4m3fn / fp8_e4m3fn_fast / fp8_e5m2), `disable_dynamic` |
+| `load_diffusion_model()` | UNETLoader | `unet_name`, `weight_dtype` (default / fp8_e4m3fn / fp8_e4m3fn_fast / fp8_e5m2), `disable_dynamic` || `load_diffusion_model()` | UNETLoader | `unet_name`, `weight_dtype` (default / fp8_e4m3fn / fp8_e4m3fn_fast / fp8_e5m2), `disable_dynamic` |
+| *(all three loaders)* | — | `device` (`None`/`"default"`, `"cpu"`, `2`, `":2"`, `"cuda:2"`) and `keep=True` to pin past `free_all()`; `resident()` and `per_gpu()` show where things landed |
 | `load_text_encoder()` | CLIPLoader | `clip_name`, `type="minimax"`, `device` (default / cpu) |
 | `load_vae()` | VAELoader | `vae_name` - the same call for the video and the audio VAE |
 | `load_lora(model, ...)` | LoraLoaderModelOnly | `lora_name`, `strength_model` |

@@ -61,6 +61,10 @@ def init_engine(verbose: bool = True, vram_headroom_gb: float = 0.0, devices=Non
 
     Every entry point in this file calls it, so an interactive session can just start
     calling loaders - but calling it yourself first is how you control logging.
+
+    devices: which GPUs aimdo arms. Any device you later hand to a loader's device=
+    has to appear here, otherwise the staged load dies with
+    'comfy-aimdo device N is not initialized'.
     """
     global _M
     if _M is not None:
@@ -162,13 +166,78 @@ def init_engine(verbose: bool = True, vram_headroom_gb: float = 0.0, devices=Non
     return _M
 
 
+# ------------------------------------------------------------------ device & residency
+# Components loaded with keep=True are tracked here so free_all() can leave them alone.
+_LOADED, _PINNED = [], []
+
+
+def _torch_device(device):
+    """Coerce a device spec to a torch.device, or None for 'let ComfyUI decide'.
+
+    Accepts None / "default" / "" (ComfyUI's choice), "cpu", an int index (2), ":2",
+    "cuda:2", or an existing torch.device.
+    """
+    if device is None or isinstance(device, torch.device):
+        return device
+    s = str(device).strip()
+    if s in ("", "default", "auto"):
+        return None
+    if s == "cpu":
+        return torch.device("cpu")
+    if s.isdigit():
+        return torch.device(f"cuda:{s}")
+    if s.startswith(":"):
+        return torch.device(f"cuda{s}")
+    return torch.device(s)
+
+
+def _pin(patcher):
+    """Remember a patcher so free_all() skips it.
+
+    Deliberately does NOT touch offload_device. For a non-dynamic patcher ComfyUI's
+    patch_weight_to_device() copies every LoRA-patched weight into self.backup on the
+    OFFLOAD device; point that at the GPU and the whole model is duplicated in VRAM
+    (19.5 GiB weights + 19.5 GiB backups) and the LoRA stage OOMs around block 42 of 50.
+    Keeping the offload device on the CPU is what leaves the weights room to be resident.
+    """
+    if patcher is None or any(patcher is p for p in _PINNED):
+        return
+    _PINNED.append(patcher)
+
+
+def resident():
+    """What is pinned where - the answer to 'did the keep actually take effect?'."""
+    for patcher in _PINNED:
+        try:
+            n = patcher.model_size() / 1024 ** 3        # staged size, what actually occupies memory
+        except Exception:
+            n = float("nan")                            # summing lazy params reports logical dtype, not staged bytes
+        print(f"pinned: {type(patcher.model).__name__:<24} load={patcher.load_device} "
+              f"offload={patcher.offload_device}  {n:.1f} GB")
+
+
+def per_gpu():
+    """Allocated GB per visible CUDA device - how you confirm a component landed on GPU 2."""
+    if not torch.cuda.is_available():
+        return
+    print("  ".join(f"gpu{i}: {torch.cuda.memory_allocated(i) / 1024 ** 3:.2f} GB"
+                    for i in range(torch.cuda.device_count())))
+
+
 # --------------------------------------------------------------------------- loaders
 def load_diffusion_model(unet_name: str = UNET, weight_dtype: str = "default",
-                         disable_dynamic: bool = False):
+                         disable_dynamic: bool = False, device=None, keep: bool = False,
+                         resident: bool = False):
     """UNETLoader. weight_dtype: default | fp8_e4m3fn | fp8_e4m3fn_fast | fp8_e5m2.
 
     Returns a ModelPatcher whose weights are staged on disk/RAM and streamed to the
     GPU on demand - the same path ComfyUI uses, so the load time is the same.
+
+    resident=True turns that off: the transformer is loaded fully onto `device` once
+    (disable_dynamic, plain CoreModelPatcher) and pinned there, so nothing streams per
+    step and nothing re-stages after a free. It costs VRAM outright - the pruned fl2va
+    checkpoint is ~21 GB of weights, so on a 32 GB card the conditioner and the video VAE
+    have to live somewhere else. resident=False keeps the streaming path.
     """
     m = init_engine()
     options = {}
@@ -179,37 +248,65 @@ def load_diffusion_model(unet_name: str = UNET, weight_dtype: str = "default",
         options["fp8_optimizations"] = True
     elif weight_dtype == "fp8_e5m2":
         options["dtype"] = torch_dtype("float8_e5m2")
+    d = _torch_device(device)
+    if d is not None:
+        options["load_device"] = options["offload_device"] = d
+    if resident:
+        disable_dynamic = True          # no ModelPatcherDynamic: weights stay put
+        keep = True                     # free_all() must not drop them - but see _pin():
+                                        # offload_device stays on the CPU, that is not a bug
     path = resolve("diffusion_models", unet_name)
     model = m["comfy"].sd.load_diffusion_model(path, model_options=options,
                                                disable_dynamic=disable_dynamic)
+    print(f"unet weights: {'resident in VRAM' if resident else 'streamed (DynamicVRAM)'}")
+    _LOADED.append(model)
+    if keep:
+        _pin(model)
     print(f"unet: {unet_name}  vram {vram_gb():.1f} GB allocated")
     return model
 
 
-def load_text_encoder(clip_name: str = CLIP, type: str = "minimax", device: str = "default"):
-    """CLIPLoader. type is the CLIPType name (minimax for H3's Qwen3-VL conditioner);
-    device: default | cpu - cpu keeps the 15 GB conditioner off the GPU."""
+def load_text_encoder(clip_name: str = CLIP, type: str = "minimax", device=None, keep: bool = False):
+    """CLIPLoader. type is the CLIPType name (minimax for H3's Qwen3-VL conditioner).
+
+    device: None/"default" (ComfyUI's pick), "cpu", or a specific GPU - 2, ":2", "cuda:2".
+    keep=True pins it: offload_device is set equal to load_device and free_all() skips it.
+    Measured on this box it saves nothing on its own - within one process ComfyUI keeps the
+    conditioner staged, and after a real free_all() the re-stage from the OS page cache costs
+    about 1 s (encode 3.0 s either way). Use it when you want a component to survive an
+    explicit free, not as a speed dial.
+    """
     m = init_engine()
     clip_type = getattr(m["comfy"].sd.CLIPType, type.upper(), m["comfy"].sd.CLIPType.STABLE_DIFFUSION)
     options = {}
-    if device == "cpu":
-        d = torch.device("cpu")
+    d = _torch_device(device)
+    if d is not None:
         options["load_device"] = options["offload_device"] = d
     path = resolve("text_encoders", clip_name)
     clip = m["comfy"].sd.load_clip(ckpt_paths=[path],
                                    embedding_directory=m["folder_paths"].get_folder_paths("embeddings"),
                                    clip_type=clip_type, model_options=options)
+    _LOADED.append(getattr(clip, "patcher", clip))
+    if keep:
+        _pin(getattr(clip, "patcher", clip))
     print(f"clip: {clip_name}  vram {vram_gb():.1f} GB allocated")
     return clip
 
 
-def load_vae(vae_name: str = VAE_VIDEO):
-    """VAELoader - the same call for the video VAE and the audio VAE."""
+def load_vae(vae_name: str = VAE_VIDEO, device=None, keep: bool = False):
+    """VAELoader - the same call for the video VAE and the audio VAE.
+
+    device goes straight into comfy.sd.VAE(device=...), which sets vae.device (every decode
+    moves its samples there) and the patcher's load_device. keep=True pins it resident.
+    """
     m = init_engine()
     path = resolve("vae", vae_name)
     sd, metadata = m["comfy"].utils.load_torch_file(path, return_metadata=True)
-    vae = m["comfy"].sd.VAE(sd=sd, metadata=metadata)
+    vae = m["comfy"].sd.VAE(sd=sd, device=_torch_device(device), metadata=metadata)
     vae.throw_exception_if_invalid()
+    _LOADED.append(getattr(vae, "patcher", None))
+    if keep:
+        _pin(getattr(vae, "patcher", None))
     print(f"vae: {vae_name}  vram {vram_gb():.1f} GB allocated")
     return vae
 
@@ -346,14 +443,28 @@ def free(*objs, empty_cache: bool = True) -> None:
     print(f"freed {len(objs)} component(s)  vram {vram_gb():.1f} GB allocated")
 
 
-def free_all(empty_cache: bool = True) -> None:
-    """Release every loaded model. Each one re-stages from disk on next use."""
+def free_all(empty_cache: bool = True, keep_pinned: bool = True) -> None:
+    """Release loaded models. Each one re-stages from disk on next use.
+
+    keep_pinned=True (default) frees only what this module loaded and did not pin, so a
+    text encoder or VAE loaded with keep=True survives. Pass False to get ComfyUI's own
+    unload-everything behaviour.
+    """
     init_engine(verbose=False)
     mm = _M["comfy"].model_management
-    mm.unload_all_models()
+    if not keep_pinned or not _LOADED:
+        mm.unload_all_models()
+    else:
+        for patcher in list(_LOADED):
+            if any(patcher is p for p in _PINNED):
+                continue
+            try:
+                mm.unload_model_and_clones(patcher)
+            except Exception:
+                pass
     if empty_cache:
         mm.soft_empty_cache()
-    print(f"freed all  vram {vram_gb():.1f} GB allocated")
+    print(f"freed  vram {vram_gb():.1f} GB allocated  pinned kept: {len(_PINNED)}")
 
 
 def status() -> None:
