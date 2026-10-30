@@ -23,10 +23,10 @@ are ComfyUI-side.
 | `h3_load.py` | the DynamicVRAM bootstrap and one loader per component; VRAM helpers |
 | `h3_core.py` | the four stages (encode / denoise / decode) over those components; also a CLI |
 | `h3_core_interactive.py` | `# %%` cells, one component per cell - the notebook path |
-Outputs land in `outputs/<script name>/` — one subfolder per generator (`h3_core/`, `h3_core_interactive/`, `minimax_h3_fast_test/`), through `h3_core.out_dir_for(__file__)`.
+Outputs land in `outputs/<script name>/` — one subfolder per generator (`h3_core/`, `h3_core_interactive/`, `minimax_h3_fast_t8/`), through `h3_core.out_dir_for(__file__)`.
 
 | `run_example.sh` | seven worked CLI commands, cheap smoke test first |
-| `minimax_h3_fast_test.py` | `minimax_h3_5s_fast.json` (the ComfyUI workflow) converted to cells: 4-LoRA chain, T8 dual-clock sampler, sol-attn, AV decode |
+| `minimax_h3_fast_t8.py` | `minimax_h3_5s_fast.json` (the ComfyUI workflow) converted to cells: 4-LoRA chain, T8 dual-clock sampler, sol-attn, AV decode |
 | `outputs/` | generated mp4s (git-ignored) |
 
 ## Prerequisites
@@ -142,7 +142,7 @@ is inherently soft no matter what the sampler does. `length` snaps to the 17k+5 
   denoising pass), and a frame count on the 17k+5 grid.
 
 
-## The fast-workflow conversion (`minimax_h3_fast_test.py`)
+## The fast-workflow conversion (`minimax_h3_fast_t8.py`)
 
 Reproduces `ComfyUI/user/default/workflows/minimax_h3/minimax_h3_5s_fast.json` by calling the
 same node implementations the server calls - including the third-party ones:
@@ -159,11 +159,13 @@ same node implementations the server calls - including the third-party ones:
 
 Two deviations, both forced by the environment rather than the graph:
 
-- **`MiniMaxH3MemoryEfficientSageAttentionPatch` (KJ nodes) is off by default.** It needs
-  sageattention >= 2.2, which is not on PyPI (it stops at 1.0.6) and ships as prebuilt CUDA
-  wheels; ComfyUI's own venv has 2.2.0, this project venv does not. It is a memory
-  optimization - the graph sets the attention backend to pytorch right after it and sol-attn
-  overrides the attention call anyway. Flip `SAGE_PATCH = True` if you install it.
+- **`MiniMaxH3MemoryEfficientSageAttentionPatch` (KJ nodes) needs a source build of
+  sageattention 2.2.0**, which PyPI does not carry. Two things bite: setup.py pins
+  `-std=c++17` while torch 2.15 headers require C++20, and `cusparse.h` is absent from the
+  system toolkit at `/usr/local/cuda-13.0` but present in the venv's pip cuda-toolkit 13.2,
+  so `CPATH` must point there. Recipe in `requirements.txt`. When it works the run logs
+  `Applying MiniMax H3 Memory Efficient Sage Attention Patch to all transformer blocks`
+  followed by `[sol_attn] composed with 50 patched attention forward(s)`.
 - **`torchaudio` is a manual install** (see `requirements.txt`): the T8 pack imports it, and
   the only cu132 build would otherwise downgrade torch.
 

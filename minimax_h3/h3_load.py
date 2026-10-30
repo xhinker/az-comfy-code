@@ -247,6 +247,35 @@ def attention_backend(model, backend: str = "comfy kitchen attention"):
     return out.result[0] if hasattr(out, "result") else out[0]
 
 
+def sage_attention_patch(model, kj_module: str = ""):
+    """MiniMaxH3MemoryEfficientSageAttentionPatch (KJ nodes): int8-QK / fp8-V attention,
+    which lowers peak VRAM on long sequences. Needs sageattention >= 2.2, which PyPI does
+    not carry - build it from source (recipe in requirements.txt). Raises ImportError with
+    the reason so a caller falls back deliberately rather than silently."""
+    import importlib.util
+    try:
+        from sageattention.core import get_cuda_arch_versions
+        archs = get_cuda_arch_versions()
+    except Exception as exc:
+        raise ImportError("sageattention >= 2.2 is required for the KJ memory-efficient "
+                          "attention patch; build it from source (see requirements.txt)") from exc
+    path = pathlib.Path(kj_module or f"{COMFY}/custom_nodes/ComfyUI-KJNodes/nodes/ltxv_nodes.py")
+    if not path.is_file():
+        raise FileNotFoundError(f"KJ node module not found at {path}")
+    if str(COMFY) not in sys.path:
+        sys.path.insert(0, str(COMFY))            # the module does `from server import PromptServer`
+    import server
+    if not hasattr(server.PromptServer, "instance"):
+        server.PromptServer.instance = None       # in-process: there is no prompt server
+    spec = importlib.util.spec_from_file_location("kj_ltxv_nodes", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    out = mod.MiniMaxH3MemoryEfficientSageAttentionPatch.execute(model=model)
+    print("sage attention patch:", "/".join(archs))
+    return out.result[0] if hasattr(out, "result") else out[0]
+
+
 def sparse_attention(model, method: str = "sol-attn", tau: float = 1.3, keep_percent: float = 10.0,
                      start_percent: float = 0.2, end_percent: float = 1.0, dense_blocks: str = "",
                      min_tokens: int = 12288, sink_conditioning: str = "exact_kv_and_rows"):

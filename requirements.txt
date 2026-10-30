@@ -53,3 +53,13 @@ packaging>=24
 # usual way silently downgrades the torch 2.15 stack above. Install it by hand instead:
 #   .venv/bin/python -m pip install --no-deps --only-binary :all: #       'torchaudio==2.11.1+cu132' --index-url https://download.pytorch.org/whl/cu132
 # Verified: imports and resamples correctly against torch 2.15.0+cu132.
+
+# sageattention 2.2.0 (needed by the KJ MiniMax H3 memory-efficient attention patch) is not
+# on PyPI either, so it was built from source into .venv:
+#   git clone --depth 1 --branch v2.2.0 https://github.com/thu-ml/SageAttention
+#   sed -i 's/-std=c++17/-std=c++20/g' SageAttention/setup.py     # torch 2.15 needs C++20
+#   PATH=/usr/local/cuda/bin:$PATH CPATH=.venv/lib/python3.13/site-packages/nvidia/cu13/include
+#   TORCH_CUDA_ARCH_LIST=12.0a MAX_JOBS=8
+#   .venv/bin/python -m pip install --no-build-isolation ./SageAttention
+# CPATH is not optional: the system toolkit (/usr/local/cuda-13.0) has no cusparse.h, the
+# pip cuda-toolkit 13.2 inside the venv does. Verified: archs -> sm120, sm86, sm86.
