@@ -20,14 +20,20 @@ are ComfyUI-side.
 
 | File | What it is |
 |---|---|
-| `h3_load.py` | the DynamicVRAM bootstrap and one loader per component; VRAM helpers |
-| `h3_core.py` | the four stages (encode / denoise / decode) over those components; also a CLI |
-| `h3_core_interactive.py` | `# %%` cells, one component per cell - the notebook path |
-Outputs land in `outputs/<script name>/` — one subfolder per generator (`h3_core/`, `h3_core_interactive/`, `minimax_h3_fast_t8/`), through `h3_core.out_dir_for(__file__)`.
-
+| `lib/h3_load.py` | the DynamicVRAM bootstrap and one loader per component; VRAM helpers |
+| `lib/h3_core.py` | the four stages (encode / denoise / decode) over those components; also a CLI |
+| `h3_fast_flex.py` | the generator on the Pika H3 Flex adapter: 6 steps, lcm, the manifest's ManualSigmas, shift 12/3 |
+| `h3_fast_8steps.py` | the same generator on the turbo LoRA chain: 8 steps, res_multistep, shift 12/5 |
+| `h3_core_interactive.py` | `# %%` cells, one component per cell - the notebook path on the full Ref2VA base |
+| `experiment/` | superseded A/B scripts kept for reference: `minimax_h3_fast_t8.py` (the workflow conversion), `h3_core_interactive_fast.py` |
+| `prompts/` | the prompt text as markdown (`prompt.md`), edited outside the code - git-ignored |
 | `run_example.sh` | seven worked CLI commands, cheap smoke test first |
-| `minimax_h3_fast_t8.py` | `minimax_h3_5s_fast.json` (the ComfyUI workflow) converted to cells: 4-LoRA chain, T8 dual-clock sampler, sol-attn, AV decode |
 | `outputs/` | generated mp4s (git-ignored) |
+
+Outputs land in `outputs/<script name>/` — one subfolder per generator (`h3_fast_flex/`,
+`h3_fast_8steps/`, `h3_core/`, `minimax_h3_fast_t8/`), through
+`h3_core.out_dir_for(__file__)`. Scripts in `experiment/` share that tree: the subfolder is
+the file's stem, not its path.
 
 ## Prerequisites
 
@@ -36,7 +42,7 @@ Outputs land in `outputs/<script name>/` — one subfolder per generator (`h3_co
 ```
 
 - A ComfyUI checkout at `/mnt/data_2t_3/github_repos/ComfyUI` (path is the `COMFY` constant
-  at the top of `h3_load.py`) with the H3 weights in its model folders.
+  at the top of `lib/h3_load.py`) with the H3 weights in its model folders.
 - **The project `.venv`.** `comfy-aimdo` and `comfy-kitchen` are abi3 wheels and install on
   this venv's CPython 3.13; the core path is verified there. In a notebook, pick the
   `az-comfy-code-313` kernel (`Ctrl+Shift+P` -> "Notebook: Select Notebook Kernel").
@@ -55,13 +61,17 @@ models/loras/minimax_h3/minimax_h3_turbo_4step_ckpt850_pruned_comfyui.safetensor
 
 ## Quick start
 
-Notebook - run `h3_core_interactive.py` cell by cell. Cell 0 setup, cell 1 the model file
-paths (edit them), cell 2 the engine, then one cell per component, then prompt and generate.
+Notebook - run `h3_fast_flex.py` or `h3_fast_8steps.py` top to bottom. Cell 0 puts `lib/` on
+`sys.path`, cell 1 the model and LoRA files (edit them), cell 2 the engine, then one cell per
+component, then the prompt and the generate loop. The prompt is read from
+`prompts/prompt.md` by `h3_core.read_prompt()`, so the text lives outside the code; an empty
+file raises instead of generating nothing. `h3_core_interactive.py` is the same path on the
+full Ref2VA base, one component per cell.
 
 CLI:
 
 ```bash
-../.venv/bin/python h3_core.py "A red fox trotting through a snowy pine forest" \
+../.venv/bin/python lib/h3_core.py "A red fox trotting through a snowy pine forest" \
     --width 832 --height 480 --length 22 --steps 4 --seed 7
 ./run_example.sh 3          # native 1344x768, 20 steps
 ```
@@ -73,7 +83,7 @@ absolute path or a name relative to ComfyUI's model folders. Load one at a time.
 
 | Call | Node | Parameters |
 |---|---|---|
-| `load_diffusion_model()` | UNETLoader | `unet_name`, `weight_dtype` (default / fp8_e4m3fn / fp8_e4m3fn_fast / fp8_e5m2), `disable_dynamic` || `load_diffusion_model()` | UNETLoader | `unet_name`, `weight_dtype` (default / fp8_e4m3fn / fp8_e4m3fn_fast / fp8_e5m2), `disable_dynamic` |
+| `load_diffusion_model()` | UNETLoader | `unet_name`, `weight_dtype` (default / fp8_e4m3fn / fp8_e4m3fn_fast / fp8_e5m2), `disable_dynamic`, `resident=True` to load it fully and pin it instead of streaming |
 | *(all three loaders)* | — | `device` (`None`/`"default"`, `"cpu"`, `2`, `":2"`, `"cuda:2"`) and `keep=True` to pin past `free_all()`; `resident()` and `per_gpu()` show where things landed |
 | `load_text_encoder()` | CLIPLoader | `clip_name`, `type="minimax"`, `device` (default / cpu) |
 | `load_vae()` | VAELoader | `vae_name` - the same call for the video and the audio VAE |
@@ -82,6 +92,33 @@ absolute path or a name relative to ComfyUI's model folders. Load one at a time.
 | `attention_backend()` | ModelAttentionBackend | `comfy kitchen attention` (INT8) or `pytorch attention` |
 | `sparse_attention()` | BlockSparseAttention | `method` (sol-attn / vsa / sla), `tau`, `keep_percent`, `start_percent`, `end_percent`, `dense_blocks`, `min_tokens`, `sink_conditioning` |
 | `free() / free_all() / status() / vram_gb()` | - | release components, print what is resident |
+
+## Two few-step configurations
+
+Each is a file of its own with no switch in it, so the two time side by side and the numbers
+mean something. Both read the same prompt file, the same geometry knobs and the same
+sol-attn settings.
+
+|  | `h3_fast_flex.py` | `h3_fast_8steps.py` |
+|---|---|---|
+| acceleration adapter | `pika_h3_flex_fl2va_comfy_bf16` at **1.0** | `minimax_h3_turbo_v4_step600_ema_pruned` + the FeiHouRemix 8-step file, **0.75** each |
+| steps | 6 | 8 |
+| sigma schedule | explicit - `h3_core.flex_sigmas()` pushes the manifest knots `1000/750/500/250/100/40/0` through `time_snr_shift`, giving `1.0 0.972973 0.923077 0.8 0.571429 0.333333 0.0`, the template's `ManualSigmas` string exactly | built by the scheduler from `steps` |
+| sampler | `lcm` (the template's `KSamplerSelect`) | `res_multistep` + `simple` |
+| shift video / audio | 12 / 3 (the Flex manifest's pair) | 12 / 5 (that pruned conversion's card: 12 / 4-6) |
+| content LoRAs | `h3_musubi_v4` 0.35, `SoftBreastMotion` 0.5 | same |
+
+- **Never stack acceleration adapters.** Flex and the turbos patch the same 208 module
+  weights; the Flex tutorial is explicit that a second few-step adapter on top breaks the
+  output. Audited against the pruned fl2va base: Flex matches 208/208 target weights and
+  attaches with zero lora errors.
+- **Six steps is a contract, not a step count.** Picking 6 in a generic scheduler gives an
+  even grid, not the knots above - which is why `flex_sigmas()` exists and why the sampler is
+  `lcm`.
+- **Content LoRAs are fine on either**, but they were tuned for the 8-step chain; at six steps
+  they read stronger, so 0.35 / 0.5 -> 0.25 / 0.35 if the frame comes back overcooked.
+- `minimax_h3_fl2v_turbo_4step_v0.1` sits in the same folder and is **inert in ComfyUI** - it
+  uses diffusers `transformer_blocks.*` naming and attaches 0 patches.
 
 ## What this box actually does
 
@@ -130,8 +167,18 @@ is inherently soft no matter what the sampler does. `length` snaps to the 17k+5 
   cache - it OOMs plain, tiled, with everything freed, and with a 2 GB headroom request.
 - Never set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` with aimdo - it hooks the
   allocator.
-- `h3_core_interactive.py` derives its import path from `__file__`, so it has to stay in
-  this folder.
+- Import paths are derived from `__file__`. `lib/h3_core.py` puts its own folder on `sys.path`
+  (so `import h3_load` works from anywhere) and treats its **parent** as the project root that
+  owns `outputs/` and `prompts/`. Every script adds `BASE / "lib"` to `sys.path`; the ones in
+  `experiment/` set `BASE = parents[1]` instead of `parent`. Move a script a level and fix its
+  BASE line.
+- **A folder named `lib/` is ignored by the repo's root `.gitignore`** (the stock Python
+  packaging block has a bare `lib/`). `minimax_h3/.gitignore` re-includes it with `!lib/`. Any
+  new folder with that name needs the same, or it silently never reaches a clone - check with
+  `git check-ignore -v <path>`.
+- **Pylance cannot see the cell-0 `sys.path.insert`**, so `import h3_load` goes red unless the
+  folder is named in `python.analysis.extraPaths` (`.vscode/settings.json` lists
+  `${workspaceFolder}/minimax_h3/lib`, alongside ComfyUI and the T8 pack for the same reason).
 - There is no negative prompt and no guidance scale: `comfy.samplers.sample()` insists on a
   negative conditioning, so `denoise()` uses `Guider_Basic`, which is what BasicGuider does.
 
@@ -176,7 +223,7 @@ WIDTH, HEIGHT = H.fit_size(FIRST_FRAME, LONG_SIDE, length=LENGTH)
 #           | latent 42x80x48 = 161280 voxels, 40320 tokens after 2x2 patchify
 ```
 
-## The fast-workflow conversion (`minimax_h3_fast_t8.py`)
+## The fast-workflow conversion (`experiment/minimax_h3_fast_t8.py`)
 
 Reproduces `ComfyUI/user/default/workflows/minimax_h3/minimax_h3_5s_fast.json` by calling the
 same node implementations the server calls - including the third-party ones:

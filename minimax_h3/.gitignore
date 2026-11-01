@@ -1,2 +1,8 @@
 # working content, not source: prompt drafts and their notes
 prompts/
+
+# The repo's root .gitignore carries the generic `lib/` line from the Python packaging
+# template, which would silently swallow this folder - and without it a clone has no
+# library at all. A negation in this file wins over the shallower pattern, so re-include
+# it explicitly. (Renaming the folder is the other option - lib/ is a very common ignore pattern.)
+!lib/

@@ -19,11 +19,13 @@ import importlib.util
 import pathlib
 import sys
 
-BASE = pathlib.Path(__file__).resolve().parent if "__file__" in globals() else pathlib.Path.cwd()
+# This file lives in minimax_h3/experiment/, so the project root (and its lib/) is one
+# level up.
+BASE = pathlib.Path(__file__).resolve().parents[1] if "__file__" in globals() else pathlib.Path.cwd()
 COMFY = pathlib.Path("/mnt/data_2t_3/github_repos/ComfyUI")
 T8 = COMFY / "custom_nodes/comfyui-minimax-h3-audio-T8"
 
-for p in (BASE, COMFY, T8):
+for p in (BASE / "lib", COMFY, T8):
     sys.path.insert(0, str(p))
 
 # Do NOT import ComfyUI's `server` here: it drags in comfy_aimdo.host_buffer, which snapshots

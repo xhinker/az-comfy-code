@@ -21,7 +21,7 @@ import pathlib
 import sys
 
 BASE = pathlib.Path(__file__).resolve().parent if "__file__" in globals() else pathlib.Path.cwd()
-sys.path.insert(0, str(BASE))
+sys.path.insert(0, str(BASE / "lib"))      # h3_load.py and h3_core.py live in minimax_h3/lib/
 
 
 # %% 1. model files - absolute paths, edit these to point anywhere

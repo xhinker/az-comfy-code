@@ -26,8 +26,12 @@ import sys
 import time
 from fractions import Fraction
 
-BASE = pathlib.Path(__file__).resolve().parent if "__file__" in globals() else pathlib.Path.cwd()
-sys.path.insert(0, str(BASE))
+# This module lives in minimax_h3/lib/. LIB_DIR is what makes `import h3_load` work from
+# any working directory; BASE is the project root, the folder whose outputs/ and prompts/
+# the stages write into - one level up, not the folder holding the code.
+LIB_DIR = pathlib.Path(__file__).resolve().parent if "__file__" in globals() else pathlib.Path.cwd()
+BASE = LIB_DIR.parent if "__file__" in globals() else pathlib.Path.cwd()
+sys.path.insert(0, str(LIB_DIR))
 
 import h3_load as L                                   # noqa: E402
 from h3_load import (UNET, CLIP, VAE_VIDEO, VAE_AUDIO, free, free_all, load_diffusion_model,  # noqa: E402

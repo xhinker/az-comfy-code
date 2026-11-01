@@ -1,7 +1,7 @@
 #!/bin/bash
-# Example runs for h3_core.py - MiniMax H3 through ComfyUI's core modules, in-process.
+# Example runs for lib/h3_core.py - MiniMax H3 through ComfyUI's core modules, in-process.
 # No ComfyUI server: the weights are read straight from the ComfyUI installation on this
-# box (paths are listed at the top of h3_load.py / h3_core_interactive.py).
+# box (paths are listed at the top of lib/h3_load.py / h3_core_interactive.py).
 #
 #   ./run_example.sh              runs the smoke test only
 #   ./run_example.sh 2            runs example 2
@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 PY=${PY:-../.venv/bin/python}
-run() { $PY h3_core.py "$@"; }
+run() { $PY lib/h3_core.py "$@"; }
 
 case "${1:-1}" in
 1)  # cheap smoke test - 22 frames at 480p, 4 steps. Good for checking the install.
