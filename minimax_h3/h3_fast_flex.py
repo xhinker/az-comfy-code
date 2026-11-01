@@ -175,8 +175,8 @@ L.status()
 
 # %% 8. generate - timed per stage
 
-for i in range(3):
-    SEED = 73+i
+for i in range(1):
+    SEED = 75+i
     _t = time.perf_counter()
     # The six-NFE schedule. flex_sigmas reproduces the template's ManualSigmas string
     # exactly: "1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0". Choosing 6 steps in

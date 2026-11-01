@@ -375,9 +375,15 @@ def sage_attention_patch(model, kj_module: str = ""):
 
 def sparse_attention(model, method: str = "sol-attn", tau: float = 1.3, keep_percent: float = 10.0,
                      start_percent: float = 0.2, end_percent: float = 1.0, dense_blocks: str = "",
-                     min_tokens: int = 12288, sink_conditioning: str = "exact_kv_and_rows"):
+                     min_tokens: int = 12288, sink_conditioning: str = "exact_kv_and_rows",
+                     extra_tokens: int = 256, verbose: bool = False):
     """BlockSparseAttention. sol-attn works on any weights (tau trades speed for detail);
-    vsa needs FastH3 weights; sla needs an SLA-style LoRA."""
+    vsa needs FastH3 weights; sla needs an SLA-style LoRA.
+
+    extra_tokens (the kernel's token_aug) attends the N highest-scoring tokens per query block
+    that block-level selection missed - 0 disables, 256 is ComfyUI's own node default. Ignored
+    for vsa, whose sparsity pattern is trained in. The T8 sol-attn override has no equivalent
+    argument, which is one reason to prefer the core path."""
     from comfy_extras.nodes_sparse_attention import apply_block_sparse_attention, parse_block_list
     vsa = method == "vsa"
     return apply_block_sparse_attention(
@@ -385,7 +391,7 @@ def sparse_attention(model, method: str = "sol-attn", tau: float = 1.3, keep_per
         topk_ratio=0.0 if method == "sol-attn" else float(keep_percent) / 100.0,
         vsa=vsa, start_percent=start_percent, end_percent=end_percent, min_tokens=min_tokens,
         dense_blocks=parse_block_list(dense_blocks), sink_conditioning=sink_conditioning,
-        extra_tokens=0 if vsa else 256, verbose=False)
+        extra_tokens=0 if vsa else int(extra_tokens), verbose=verbose)
 
 
 # ---------------------------------------------------------------------- memory
