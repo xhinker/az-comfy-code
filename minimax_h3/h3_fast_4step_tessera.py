@@ -131,9 +131,12 @@ L.status()
 W, H_ = H.fit_size(IMAGE, long_side=LONG_SIDE, length=LENGTH)
 print(f"draft {W}x{H_} x {LENGTH} frames ({H.duration_of(LENGTH):.2f}s) | {STEPS} steps")
 
-_t = time.perf_counter()
+#%%
 cond, latent    = H.encode(clip, vae, PROMPT, mode=MODE, width=W, height=H_, length=LENGTH, image=IMAGE)
-out             = H.denoise(model, cond, latent, steps=STEPS, sampler=SAMPLER, scheduler=SCHEDULER, SEED=SEED)
+
+#%%
+_t = time.perf_counter()
+out             = H.denoise(model, cond, latent, steps=STEPS, sampler=SAMPLER, scheduler=SCHEDULER, seed=SEED)
 draft           = H.decode(vae, audio_vae, out, H.out_dir_for(__file__) / f"draft_{W}x{H_}_75.mp4")
 print(f"draft done in {time.perf_counter() - _t:.1f}s -> {draft}")
 
@@ -235,7 +238,7 @@ refined = result(TesseraRefine().run(
     pixel_out=True, spatial_tile=TILE_BUDGET, temporal_tile=TILE_BUDGET,
     temporal_size=TEMPORAL_SIZE, temporal_overlap=TEMPORAL_OVERLAP,
     tile_width=TILE_W, tile_height=TILE_H, context_border=CONTEXT_BORDER,
-    cfg=1.0, SEED=SEED, seed_mode="fixed", console_progress="overall"))
+    cfg=1.0, seed=SEED, seed_mode="fixed", console_progress="overall"))
 refined_latent, report, refined_images = refined[0], refined[1], refined[2]
 print(f"refine {time.perf_counter() - _t:.1f}s for {tuple(refined_images.shape)}")
 print(f"report:\n{report}")
