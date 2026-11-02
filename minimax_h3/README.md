@@ -24,6 +24,10 @@ are ComfyUI-side.
 | `lib/h3_core.py` | the four stages (encode / denoise / decode) over those components; also a CLI |
 | `h3_fast_flex.py` | the generator on the Pika H3 Flex adapter: 6 steps, lcm, the manifest's ManualSigmas, shift 12/3 |
 | `h3_fast_8steps.py` | the same generator on the turbo LoRA chain: 8 steps, res_multistep, shift 12/5 |
+| `h3_fast_4step.py` | the same generator on the LightX2V 4-step adapter, on core sparse attention rather than the T8 pack |
+| `h3_fast_4step_tessera.py` | draft a clip at 4 steps, then re-render it 2x larger with ComfyUI-Tessera + Ref2VA, in one file |
+| `tessera_upscaler.py` | upscale **any** mp4 with that same refiner: set `INPUT`, run the cells |
+| `lib/h3_tessera.py` | the general Tessera wrapper - model paths, prompt and settings all passed in, nothing about this machine baked in |
 | `h3_core_interactive.py` | `# %%` cells, one component per cell - the notebook path on the full Ref2VA base |
 | `experiment/` | superseded A/B scripts kept for reference: `minimax_h3_fast_t8.py` (the workflow conversion), `h3_core_interactive_fast.py` |
 | `prompts/` | the prompt text as markdown (`prompt.md`), edited outside the code - git-ignored |
@@ -32,7 +36,7 @@ are ComfyUI-side.
 
 Outputs land in `outputs/<script name>/` — one subfolder per generator (`h3_fast_flex/`,
 `h3_fast_8steps/`, `h3_core/`, `minimax_h3_fast_t8/`), through
-`h3_core.out_dir_for(__file__)`. Scripts in `experiment/` share that tree: the subfolder is
+`h3_core.out_dir_for(__file__)` (`tessera_upscaler/` for the upscaler). Scripts in `experiment/` share that tree: the subfolder is
 the file's stem, not its path.
 
 ## Prerequisites
@@ -119,6 +123,73 @@ sol-attn settings.
   they read stronger, so 0.35 / 0.5 -> 0.25 / 0.35 if the frame comes back overcooked.
 - `minimax_h3_fl2v_turbo_4step_v0.1` sits in the same folder and is **inert in ComfyUI** - it
   uses diffusers `transformer_blocks.*` naming and attaches 0 patches.
+
+## Upscaling an existing clip (ComfyUI-Tessera + Ref2VA)
+
+ComfyUI-Tessera (`hashu786/ComfyUI-Tessera`, MIT) is **not** a sampler-speed tool. It is a
+Ref2VA re-renderer: it encodes the source into an upscaled *plate* latent plus guide
+conditioning in temporal windows (`TesseraEncode`), plans a tile grid (`TesseraPlan`), then
+resamples tile-by-tile and chunk-by-chunk (`TesseraRefine`) with the source clip wired in as
+the `<Video 1>` reference. Detail and faces come back **reconstructed**, not interpolated -
+which is the point, and also the cost: it is real sampling over a bigger token grid.
+
+| File | Use it for |
+|---|---|
+| `tessera_upscaler.py` | any mp4 on disk: set `INPUT`, run the cells. Folder mode in the last cell |
+| `h3_fast_4step_tessera.py` | generate a cheap 4-step draft and refine it in one pass |
+| `lib/h3_tessera.py` | the machinery, as callable functions: `init`, `load_support`, `load_ref2va`, `read_video`, `upscale` |
+
+The lib takes every path, the prompt string and all settings as arguments - it has no
+opinion about this machine - so the interactive file is the only place paths live.
+
+Install and weights:
+
+```bash
+git clone https://github.com/hashu786/ComfyUI-Tessera \
+  /mnt/data_2t_3/github_repos/ComfyUI/custom_nodes/ComfyUI-Tessera     # 9 nodes
+hf download RunningHubAI/rh-minimax-h3-lms-v1.0-r64.safetensors-lora \
+  minimax_h3_lms_v1.0_r64.safetensors --local-dir models/loras/minimax_h3
+hf download Robert1212star/TaoMate-H3-3Step-ComfyUI \
+  taomate_h3_3step_comfy.safetensors --local-dir models/loras/minimax_h3
+```
+
+The pack's own workflow names `minimax_h3_taomate_3step_lora_avg_rank_19_bf16`, which is not
+published under that name - it is a rank-averaged conversion. Those two upstream originals
+replace it, audited against the pruned ref2va base: **taomate 208/208** and **LMS 258/258**
+target weights attach (the LMS file's own metadata says `minimax_h3_ref2va_sharpness`).
+
+Measured here, 416x576 x 124 frames in, `UPSCALE_BY=2`, 4 steps, `low_vram` tiles:
+
+| stage | time | output |
+|---|---|---|
+| draft (4 steps, LightX2V) | 17-27 s | 416x576, h264 + aac |
+| refine (3 temporal chunks x 4 tiles x 4 steps) | **145-164 s** | 832x1152, 124 frames, same duration |
+
+2.4-2.9 s/step with core sparse attention active (`sparse producer path: 16523 tokens,
+sinks (0,149)/(144,149)`, blocks 0 and 1 dense). Keeping the support card for the text
+encoder and VAEs (`H3_GPUS=0,2`) is ~10% faster than squeezing everything onto one GPU.
+
+Calling the pack from a script rather than a graph exposes five contracts the UI hides:
+
+- the nodes are **instance** methods - `TesseraPlan().run(...)`, not `TesseraPlan.run(...)`
+- `TesseraPlan.run` returns a plain `{"ui": ..., "result": (...)}` dict, not a `NodeOutput`,
+  and declares `tile_width` / `tile_height` / `context_border` **with no defaults** - Plan and
+  Refine must be handed the same numbers or they silently disagree
+- `ConditioningZeroOut` returns a tuple of outputs; index `[0]` is the conditioning
+- `SaveVideo` reads `cls.hidden.extra_pnginfo`, which only exists under the graph executor -
+  headless, write with the `Video` object's own `save_to()` instead
+- the H3 DiT reads `x[1]` as the audio stream, so a video-only plate crashes inside
+  `model.forward`: the plate is concatenated with an audio latent (`LTXVConcatAVLatent` +
+  `SetLatentNoiseMask` over the encoded soundtrack, synthesised silence if the source has none)
+
+Two limits worth knowing before you trust the output:
+
+- **Audio is carried, not regenerated.** Decoding the refined latent's audio stream with the
+  audio VAE dies in `tiled_scale`, so the source track muxes back 1:1 - the refine preserves
+  frame count and timing exactly, which is what makes that honest. The pack's full recipe
+  regenerates audio by keeping the AV latent nested end to end.
+- **`steps=4` is a contract with the distill adapter.** With the taomate 3-step LoRA on the
+  model, 4 is right; strip the adapters and 4 gives a soft mush - push toward 20.
 
 ## What this box actually does
 
