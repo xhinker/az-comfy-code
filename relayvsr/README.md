@@ -29,12 +29,73 @@ where it sits in the graph - it replaces the video VAE, it is not one.
 Because only the keyframes go through Wan, a long clip costs Flash time, not Wan time: 96 frames
 at 624x360 -> 2496x1440 ran at ~3 fps on a 5090.
 
+## Getting the best quality out of it
+
+Measured on a 5090 with the official demo clip (624x360 -> 2496x1440, 48 frames). Proxies:
+`sharp` = Laplacian variance, `hf` = mean high-frequency energy, `tremb` = frame-to-frame
+change in that high-frequency band (shimmer/crawl), `delta` = mean pixel distance from the
+plain bicubic upscale (how much the model is actually adding).
+
+| setting | fps | sharp | hf | tremb | delta |
+|---|---|---|---|---|---|
+| x4 weights, sr_ratio 4, detail 1.0, chunk 16 | 3.2 | 105 | 0.90 | 1.04 | 4.62 |
+| same, detail 0.8 | 3.2 | 91 | 0.80 | 0.92 | 3.75 |
+| same, detail 0.6 | 3.2 | 80 | 0.70 | 0.79 | 2.84 |
+| same, detail 0.0 (= bicubic) | 3.2 | 64 | 0.49 | 0.53 | 0.62 |
+| chunk_len 8 | 2.8 | 110 | 0.95 | 1.11 | 4.99 |
+| chunk_len 32 | 3.5 | 102 | 0.87 | 1.01 | 4.35 |
+
+At the same 1248x720 output size: **x4 weights at sr_ratio 4 then a lanczos downscale** scored
+sharp 417 / hf 2.09 / tremb 2.67, versus **native x2 weights at sr_ratio 2** at 270 / 1.91 / 2.25.
+More detail, but also ~19% more shimmer - which is the trade in this model family.
+
+What that means in practice:
+
+- **`detail` (0-1, default 1.0)** is the quality knob: it scales the Flash decoder's residual
+  before it is added to the bicubic upscale of each frame, so 0.0 is plain bicubic and 1.0 is
+  the full model output. Drop it to 0.6-0.8 when the pass over-sharpens, invents texture the
+  source cannot support, or the added fine detail crawls in motion. Same knob as ComfyUI core's
+  VSR Decode node (`--detail` on the CLI, `DETAIL` in the interactive script).
+- **`sr_ratio` and the weights are not the same decision.** The x4 weights can render at 4x and
+  you can downscale yourself afterwards; that buys real detail at 2x output. `--downscale` does
+  exactly that in one pass, on the way to the encoder:
+
+  ```bash
+  ./relayvsr_upscale.py clip.mp4 --scale 4 --sr-ratio 4 --downscale 720
+  ```
+
+  Three forms: `0.5` (factor of the model output, decimal point required), `720` (target height,
+  width follows the aspect ratio), `1248x720` (exact size - note the demo clip's 2496x1440 is
+  1.733:1, not 16:9, so an exact WxH can nudge the aspect). Lanczos, dimensions rounded to even
+  for YUV420, and it only shrinks - growing the model output here would be bilinear nonsense.
+  The x2 weights compute at 2x instead, which is 3-4x cheaper and steadier in motion; LightX2V
+  ships them precisely so H3/Wan clips do not pay 4x pixel work for a 2x finish.
+- **`chunk_len` is the fidelity/cost dial** (default 16 = a Wan reference every 15 frames).
+  Shorter windows = more generative references = more detail, less drift, more time. The paper
+  is explicit that keyframe errors propagate across the frames that follow, so a long window
+  that starts on a bad reference keeps paying for it.
+- **One-step distilled: do not go hunting for steps/CFG/denoise.** There are none. `seed` only
+  re-rolls the reference latents; it rarely changes the look, but it is the first thing to try
+  when one specific frame has an artifact.
+- **The prompt is baked in.** `positive_conditioning` lives in the checkpoint; there is no text
+  encoder and no way to steer "keep the bokeh" or "no extra grain" with words.
+- **Feed it clean input.** It is a super-resolver, not a repair tool: heavy macroblocking and
+  banding get upscaled into permanent structure. Deint/denoise/decdeblock upstream if the
+  source is a bad rip, and keep the encode you feed it high quality (CRF 12-15 or a lossless
+  intermediate).
+- **Output encode is not the quality limit.** `CRF 18 / medium` costs under a second per 24
+  frames against ~15 s of model time; go to CRF 16 or `veryslow` for free if you care about the
+  file rather than the wall clock.
+- **Colour drift:** the model can shift contrast/colour slightly. If you are matching against
+  the source, a per-frame colour-match pass after this one is standard practice in this model
+  family (SeedVR2/FlashVSR users do the same).
+
 ## Files
 
 | File | What it is |
 |---|---|
 | `relayvsr_interactive.py` | `# %%` cells: input, settings, weights, engine, **load the diffusion model**, **load the Flash (VAE-side) model**, run, save the output video, free |
-| `relayvsr_upscale.py` | the same pipeline as a CLI (`--scale`, `--sr-ratio`, `--chunk-len`, `--offload`, `--codec`, `--crf`) |
+| `relayvsr_upscale.py` | the same pipeline as a CLI (`--scale`, `--sr-ratio`, `--chunk-len`, `--detail`, `--downscale`, `--offload`, `--codec`, `--crf`) |
 | `lib/relayvsr_load.py` | the ComfyUI-core bootstrap: `COMFY` / `PYTHON` paths, weight resolution, `engine()`, `load_wan()`, `load_flash()`, `run()`, `save()`, `free()`, `vram_line()` |
 | `lib/relayvsr_engine.py` | assembly + streaming inference: `load_wan()` / `load_flash()` / `restore(frames, seed, sr_ratio, chunk_len)` |
 | `lib/relayvsr_wan.py` `lib/relayvsr_flash.py` | the two networks: pre / blocks / post, ring K/V caches, windowed attention |
@@ -80,6 +141,8 @@ Single-connection downloads from HF run ~0.9 MB/s on this box and the `hf` CLI s
 ./run_example.sh                                    # cheap smoke test first
 ./relayvsr_upscale.py inputs/demo_input.mp4 --scale 4 --sr-ratio 4 --max-frames 96
 ./relayvsr_upscale.py clip.mp4 --scale 4 --sr-ratio 2 --offload      # 24 GB cards
+./relayvsr_upscale.py clip.mp4 --scale 4 --sr-ratio 4 --downscale 720  # render 4x, save at 720p
+./relayvsr_upscale.py clip.mp4 --scale 4 --sr-ratio 4 --downscale 0.5  # ...or half the model output
 ```
 
 or open `relayvsr_interactive.py` and run the cells - cell 5 loads the Wan backbone on its own,

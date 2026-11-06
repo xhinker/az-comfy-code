@@ -127,7 +127,7 @@ class FlashTransformer:
             history.store(index, key, value)
         return x
 
-    def decode(self, hidden, lr):
+    def decode(self, hidden, lr, detail: float = 1.0):
         height, width = self.geometry.latent_grid(*lr.shape[-2:])
         pixels = F.linear(
             F.silu(F.linear(hidden, self.head[0], self.head[1])),
@@ -136,4 +136,10 @@ class FlashTransformer:
         )
         channels = pixels.shape[1]
         residual = F.pixel_shuffle(pixels.t().reshape(1, channels, height, width), 16)
+        # `detail` scales what the decoder adds on top of the bicubic upscale of the frame.
+        # Same knob as ComfyUI core's VSR Decode node (added in ComfyUI #17511): 1.0 is the
+        # full model output, 0.0 is plain bicubic. Lower it if the pass over-sharpens or the
+        # fine texture crawls in motion.
+        if detail != 1.0:
+            residual = residual * float(detail)
         return F.interpolate(lr, scale_factor=self.geometry.scale, mode="bicubic", align_corners=False) + residual

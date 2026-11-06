@@ -23,12 +23,19 @@ def main():
     p.add_argument("--sr-ratio", type=int, default=4, choices=(2, 4), help="output ratio")
     p.add_argument("--chunk-len", type=int, default=16, help="frames per streaming window")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--detail", type=float, default=1.0,
+                   help="0-1, how much of the decoder's detail is added on top of the bicubic "
+                        "upscale; 1 = full model output (ComfyUI core's VSR Decode knob)")
     p.add_argument("--max-frames", type=int, default=0, help="0 = whole clip")
     p.add_argument("--start-frame", type=int, default=0)
     p.add_argument("--dtype", default="bf16", choices=("bf16", "fp16"))
     p.add_argument("--offload", action="store_true", help="park Wan blocks in CPU RAM (24 GB cards)")
     p.add_argument("--codec", default="h264", choices=("h264", "h265", "libx264", "libx265"))
     p.add_argument("--crf", type=int, default=18)
+    p.add_argument("--downscale", default="",
+                   help="shrink the saved video: 0.5 = half the model output, 720 = target height, "
+                        "1248x720 = exact size. Lanczos, applied after the model - so x4 weights "
+                        "at --sr-ratio 4 downscaled to a 2x finish keep more detail than x2 weights")
     p.add_argument("--preset", default="medium")
     args = p.parse_args()
 
@@ -44,9 +51,12 @@ def main():
     L.load_flash(engine)
 
     frames, plan = L.run(engine, str(src), sr_ratio=args.sr_ratio, chunk_len=args.chunk_len,
-                         seed=args.seed, max_frames=args.max_frames, start_frame=args.start_frame)
+                         seed=args.seed, detail=args.detail, downscale=args.downscale or None,
+                         max_frames=args.max_frames, start_frame=args.start_frame)
+    model = f" (model rendered {plan['model_size']}, downscaled {plan['downscale']})" \
+        if "model_size" in plan else ""
     print(f"{plan['in_size']} -> {plan['out_size']} @ {plan['fps']:.2f} fps, "
-          f"native x{plan['native_scale']}, chunk {plan['chunk_len']}")
+          f"native x{plan['native_scale']}, chunk {plan['chunk_len']}{model}")
     path, written, seconds = L.save(frames, out, fps=plan["fps"], codec=args.codec, crf=args.crf,
                                     preset=args.preset, audio_from=src if plan["has_audio"] else None)
     print(f"saved {written} frames in {seconds:.1f} s ({written / seconds:.2f} fps) -> {path}")

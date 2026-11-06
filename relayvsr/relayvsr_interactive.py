@@ -32,9 +32,19 @@ SCALE       = 2                     # which weights to use: 2 or 4
 SR_RATIO    = 2                     # output ratio: x2 weights take 2; x4 weights take 2 or 4
 CHUNK_LEN   = 16                    # frames per streaming window (reference interval + 1)
 SEED        = 42                    # only the reference-frame noise; the model is 1-step distilled
+DETAIL      = 1.0                   # 0-1: how much decoder detail is added on top of bicubic.
+                                    # 1.0 = the model's full output; drop to ~0.7 if it over-sharpens
+                                    # or the added texture crawls in motion
 DTYPE       = "bf16"
 OFFLOAD     = True               # True parks the Wan blocks in CPU RAM: needed on 24 GB cards
 CODEC, CRF, PRESET = "h264", 18, "medium"
+DOWNSCALE   = ""                    # "" keeps the model output. Otherwise:
+                                    #   "0.5"      half the model output
+                                    #   "720"      target height (width follows aspect)
+                                    #   "1248x720" exact size
+                                    # Lanczos, applied after the model: x4 @ sr_ratio 4 then
+                                    # downscale to a 2x finish scores higher on detail than the
+                                    # x2 weights at sr_ratio 2
 
 ## %% 3. weights (relayvsr/models, git-ignored)
 L.check_weights(SCALE)
@@ -52,6 +62,7 @@ L.load_flash(engine)
 INPUT = str(BASE / "inputs" / "demo_input.mp4")   # the official demo clip; point this at any mp4
 
 frames, plan = L.run(engine, INPUT, sr_ratio=SR_RATIO, chunk_len=CHUNK_LEN, seed=SEED,
+                     detail=DETAIL, downscale=DOWNSCALE or None,
                      max_frames=MAX_FRAMES, start_frame=START_FRAME)
 plan
 

@@ -7,9 +7,11 @@ variable from an interactive session:
     load_wan(engine)     the large Wan backbone that makes keyframe reference latents
     load_flash(engine)   the small Flash decoder that super-resolves every frame
 
-Unlike the H3 / MOSS folders in this repo, RelayVSR has **no ComfyUI node** to call:
-upstream ComfyUI (0.44.0 as of writing) has no RelayVSR support, so the networks here
-are the reference implementation ported into lib/. What ComfyUI core still gives us is
+Unlike the H3 / MOSS folders in this repo, RelayVSR has no released ComfyUI node to call:
+PR Comfy-Org/ComfyUI#17511 merged RelayVSR into master on 2026-11-05 (RelayVSRConditioning +
+VSRDecode), but the newest release, 0.44.0, predates it and needs a comfy-kitchen newer than
+the 0.2.37 here for its window_attention. So the networks here are the reference
+implementation ported into lib/. What ComfyUI core still gives us is
 the part that matters on a consumer card - `comfy.quant_ops` INT8 conv-rotation kernels
 for the Wan linears (5.2 GB of weights instead of 9.4 GB in bf16) and
 `comfy.model_management` for device and memory reporting.
@@ -165,7 +167,55 @@ def free(eng, verbose: bool = True):
         print(f"freed  {vram_line()}")
 
 
+def parse_downscale(spec, out_w: int, out_h: int):
+    """Resolve a downscale spec to a final (width, height), or None for "leave it alone".
+
+    Three forms, chosen by how they are written:
+        "0.5"       a factor of the model output - must carry the decimal point
+        "720"       a target height; the width follows the aspect ratio
+        "1248x720"  an exact size
+    Dimensions are rounded down to even numbers because the encoder is YUV420.
+    """
+    s = "" if spec is None else str(spec).strip().lower().replace(" ", "")
+    if not s:
+        return None
+    if "x" in s:
+        try:
+            w, h = (int(v) for v in s.split("x", 1))
+        except ValueError:
+            raise SystemExit(f"downscale: expected WxH, got {spec!r}")
+    elif "." in s:
+        f = float(s)
+        if not 0.0 < f < 1.0:
+            raise SystemExit(f"downscale: a factor has to be between 0 and 1 (got {spec!r}); "
+                             "write a bare number for a target height, or WxH for an exact size")
+        w, h = int(out_w * f), int(out_h * f)
+    else:
+        h = int(s)
+        w = int(round(out_w * h / out_h))
+    if w < 2 or h < 2:
+        raise SystemExit(f"downscale {spec!r} asks for a {w}x{h} picture; a factor needs to be "
+                         "above 0, a target height at least 2 pixels")
+    w, h = w - w % 2, h - h % 2
+    if (w, h) == (out_w, out_h):
+        return None
+    if w > out_w or h > out_h:
+        raise SystemExit(f"downscale {spec!r} -> {w}x{h} is bigger than the model output "
+                         f"{out_w}x{out_h}; this option only shrinks")
+    return (w, h)
+
+
+def downscale_frames(frames, size):
+    """Lanczos shrink of the model's frames, applied as they stream (no extra file)."""
+    import numpy as np
+    from PIL import Image
+    width, height = size
+    for frame in frames:
+        yield np.asarray(Image.fromarray(frame).resize((width, height), Image.LANCZOS))
+
+
 def run(eng, input_path, sr_ratio: int = 2, chunk_len: int = 16, seed: int = 42,
+        detail: float = 1.0, downscale=None,
         max_frames: int = 0, start_frame: int = 0, check=None):
     """Start an upscale. Returns (frames, plan) - the work happens as `frames` is consumed.
 
@@ -179,13 +229,19 @@ def run(eng, input_path, sr_ratio: int = 2, chunk_len: int = 16, seed: int = 42,
         "input": str(input_path), "in_size": (info["width"], info["height"]),
         "out_size": (target[1], target[0]), "fps": info["fps"], "frames_in_file": info["frames"],
         "sr_ratio": sr_ratio, "native_scale": eng.geometry.scale, "chunk_len": chunk_len,
-        "seed": seed, "max_frames": max_frames, "start_frame": start_frame,
+        "seed": seed, "detail": detail, "max_frames": max_frames, "start_frame": start_frame,
         "has_audio": info["has_audio"],
     }
     frames = eng.restore(
         relayv_iter(input_path, max_frames, start_frame),
-        seed=seed, sr_ratio=sr_ratio, chunk_len=chunk_len, check=check,
+        seed=seed, sr_ratio=sr_ratio, chunk_len=chunk_len, detail=detail, check=check,
     )
+    # The shrink happens after the model, on the way to the encoder: the x4 weights rendered at
+    # 4x and then downscaled keep measurably more detail than the x2 weights at 2x.
+    size = parse_downscale(downscale, *plan["out_size"]) if downscale else None
+    if size:
+        frames = downscale_frames(frames, size)
+        plan["model_size"], plan["out_size"], plan["downscale"] = plan["out_size"], size, str(downscale)
     return frames, plan
 
 

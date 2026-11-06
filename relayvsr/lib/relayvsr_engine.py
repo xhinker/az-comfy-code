@@ -228,8 +228,13 @@ class RelayVSREngine:
         pixels = prediction[0].add(1).mul(127.5).clamp(0, 255).to(torch.uint8)
         return pixels.permute(1, 2, 0).contiguous().cpu().numpy()
 
-    def restore(self, frames, seed=42, sr_ratio=2, chunk_len=16, check=None):
-        """frames: an iterable of uint8 (3,H,W) CPU tensors; yields HWC uint8 numpy arrays."""
+    def restore(self, frames, seed=42, sr_ratio=2, chunk_len=16, detail=1.0, check=None):
+        """frames: an iterable of uint8 (3,H,W) CPU tensors; yields HWC uint8 numpy arrays.
+
+        detail (0..1) scales the Flash decoder's residual: 1.0 = the full model output,
+        0.0 = the plain bicubic upscale. Dial it back when the pass adds texture the source
+        does not support (fabric crawling, shimmer on motion, over-crisp skin).
+        """
         if not self.loaded:
             self.load()
         chunk_len = max(2, int(chunk_len))
@@ -267,7 +272,7 @@ class RelayVSREngine:
                         hidden, conditions, state.flash_kv, offset, lr.shape[-2] // self.geometry.latent_stride,
                         lr.shape[-1] // self.geometry.latent_stride,
                     )
-                    prediction = self.flash.decode(hidden, lr)
+                    prediction = self.flash.decode(hidden, lr, detail)
                     prediction = prediction[..., : height * scale, : width * scale]
                     if first_window or offset > 0:
                         yield self._postprocess(prediction, target)
