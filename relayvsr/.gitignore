@@ -1,0 +1,17 @@
+# The clips you feed the scripts and the mp4s they write: keep the folders in git,
+# ignore everything inside them. The leading `!dir/` lines matter - the repo-root
+# .gitignore excludes `outputs/` as a directory, and git will not descend into an
+# excluded directory to apply a negation, so un-exclude the directory first.
+!inputs/
+inputs/*
+!inputs/.gitkeep
+
+!outputs/
+outputs/*
+!outputs/.gitkeep
+
+# The repo-root .gitignore carries a bare `lib/` (Python-template artifact), which would
+# otherwise hide these modules. Negating the directory itself is what re-includes it.
+!lib/
+
+# weights are downloaded by get_weights.sh, never committed (see models/.gitignore)
