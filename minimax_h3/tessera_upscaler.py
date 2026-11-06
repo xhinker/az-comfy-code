@@ -44,7 +44,6 @@ LORAS = [(f"{COMFY_ROOT}/models/loras/minimax_h3/taomate_h3_3step_comfy.safetens
          (f"{COMFY_ROOT}/models/loras/minimax_h3/minimax_h3_lms_v1.0_r64.safetensors", 0.75)]
 
 ## %% 2. what to upscale
-INPUT       = str(BASE / "outputs" / "h3_fast_4step_tessera" / "draft_416x576_75.mp4")
 OUT_DIR     = BASE / "outputs" / "tessera_upscaler"    # file name is built from the source
 UPSCALE_BY  = 2        # 2 is the pack's validated ratio; 4 works but the plate gets huge
 SEED        = 0
@@ -88,7 +87,9 @@ model = T.load_ref2va(comfy_root=COMFY_ROOT, model_path=REF2VA, loras=LORAS, dev
                       tau=TAU, dense_blocks=DENSE_BLOCKS, extra_tokens=EXTRA_TOKENS,
                       shift_video=SHIFT_VIDEO, shift_audio=SHIFT_AUDIO)
 
+#%%
 ## %% 6. go - re-run this cell for the next clip
+INPUT       = "/home/andrewzhu/storage_8t_4/comfyui_output/output/video/ComfyUI_00202_.mp4"
 images, audio, fps = T.read_video(INPUT, comfy_root=COMFY_ROOT, max_frames=MAX_FRAMES)
 T.upscale(comfy_root=COMFY_ROOT, video_path=INPUT, clip=clip, vae=vae, audio_vae=audio_vae,
           model=model, prompt=REFINE_PROMPT, out_dir=OUT_DIR, upscale_by=UPSCALE_BY,
@@ -97,15 +98,15 @@ T.upscale(comfy_root=COMFY_ROOT, video_path=INPUT, clip=clip, vae=vae, audio_vae
           temporal_overlap=TEMPORAL_OVERLAP, tile_width=TILE_W, tile_height=TILE_H,
           context_border=CONTEXT_BORDER, images=images, audio=audio, fps=fps, release=False)
 
-## %% 7. optional - a whole folder, one model load. Skip cell 6 when using this.
-IN_DIR = None         # e.g. pathlib.Path("/home/andrewzhu/videos")
-if IN_DIR:
-    for clip_path in sorted(pathlib.Path(IN_DIR).glob("*.mp4")):
-        print(f"\n=== {clip_path.name} ===")
-        T.upscale(comfy_root=COMFY_ROOT, video_path=clip_path, clip=clip, vae=vae,
-                  audio_vae=audio_vae, model=model, prompt=REFINE_PROMPT, out_dir=OUT_DIR,
-                  upscale_by=UPSCALE_BY, steps=STEPS, sampler=SAMPLER, seed=SEED,
-                  tile_budget=TILE_BUDGET, temporal_size=TEMPORAL_SIZE,
-                  temporal_overlap=TEMPORAL_OVERLAP, tile_width=TILE_W, tile_height=TILE_H,
-                  context_border=CONTEXT_BORDER, max_frames=MAX_FRAMES, release=False)
-    L.free(model)
+# ## %% 7. optional - a whole folder, one model load. Skip cell 6 when using this.
+# IN_DIR = None         # e.g. pathlib.Path("/home/andrewzhu/videos")
+# if IN_DIR:
+#     for clip_path in sorted(pathlib.Path(IN_DIR).glob("*.mp4")):
+#         print(f"\n=== {clip_path.name} ===")
+#         T.upscale(comfy_root=COMFY_ROOT, video_path=clip_path, clip=clip, vae=vae,
+#                   audio_vae=audio_vae, model=model, prompt=REFINE_PROMPT, out_dir=OUT_DIR,
+#                   upscale_by=UPSCALE_BY, steps=STEPS, sampler=SAMPLER, seed=SEED,
+#                   tile_budget=TILE_BUDGET, temporal_size=TEMPORAL_SIZE,
+#                   temporal_overlap=TEMPORAL_OVERLAP, tile_width=TILE_W, tile_height=TILE_H,
+#                   context_border=CONTEXT_BORDER, max_frames=MAX_FRAMES, release=False)
+#     L.free(model)
