@@ -304,6 +304,11 @@ def load_vae(vae_name: str = VAE_VIDEO, device=None, keep: bool = False):
     sd, metadata = m["comfy"].utils.load_torch_file(path, return_metadata=True)
     vae = m["comfy"].sd.VAE(sd=sd, device=_torch_device(device), metadata=metadata)
     vae.throw_exception_if_invalid()
+    # Inference weights must not want gradients: comfy-kitchen's fused int8 kernels export
+    # their operands through dlpack, which refuses tensors attached to a graph. The int8
+    # convrot H3 video VAE leaves most of its norm/conv weights with requires_grad=True, and
+    # the decode then dies with "Can't export tensors that require gradient".
+    vae.first_stage_model.requires_grad_(False)
     _LOADED.append(getattr(vae, "patcher", None))
     if keep:
         _pin(getattr(vae, "patcher", None))

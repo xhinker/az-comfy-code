@@ -27,8 +27,10 @@ are ComfyUI-side.
 | `h3_fast_4step.py` | the same generator on the LightX2V 4-step adapter, on core sparse attention rather than the T8 pack |
 | `h3_fast_4step_tessera.py` | draft a clip at 4 steps, then re-render it 2x larger with ComfyUI-Tessera + Ref2VA, in one file |
 | `tessera_upscaler.py` | upscale **any** mp4 with that same refiner: set `INPUT`, run the cells |
+| `lib/h3_hyperflow.py` | HyperFlow glue: registers the two custom node packs in-process, loads the GGUF, emits its 4/6/8-step sigma grid |
 | `lib/h3_tessera.py` | the general Tessera wrapper - model paths, prompt and settings all passed in, nothing about this machine baked in |
 | `h3_core_interactive.py` | `# %%` cells, one component per cell - the notebook path on the full Ref2VA base |
+| `h3_hyperflow_interactive.py` | the same nine cells on **HyperFlow H3 Flash** (13.7B few-step H3): 6 steps, CFG 1, GGUF |
 | `experiment/` | superseded A/B scripts kept for reference: `minimax_h3_fast_t8.py` (the workflow conversion), `h3_core_interactive_fast.py` |
 | `prompts/` | the prompt text as markdown (`prompt.md`), edited outside the code - git-ignored |
 | `run_example.sh` | seven worked CLI commands, cheap smoke test first |
@@ -123,6 +125,48 @@ sol-attn settings.
   they read stronger, so 0.35 / 0.5 -> 0.25 / 0.35 if the frame comes back overcooked.
 - `minimax_h3_fl2v_turbo_4step_v0.1` sits in the same folder and is **inert in ComfyUI** - it
   uses diffusers `transformer_blocks.*` naming and attaches 0 patches.
+
+## HyperFlow H3 Flash (Video Rebirth's compressed H3)
+
+HyperFlow H3 Flash is a pruned, low-rank, few-step MiniMax-H3: the fl2va partition drops 3 of 50
+blocks and factorizes 102 linear layers - 13.7B parameters against the ~31B base. It samples at
+CFG 1.0 in 4, 6 or 8 steps on a fixed grid, and every token is conditioned on two times: the
+current noise level `t` and the step endpoint `r`. That two-time conditioning is what makes 6
+steps enough. Same text encoder and same VAEs as everything else here - only the transformer is
+new.
+
+- **Weights:** `models/diffusion_models/minimax_h3/minimax_h3_fl2va_hyperflow_flash_14b-Q4_K_M.gguf`
+  (9.1 GB, sha256-verified against the hub). From `VideoRebirthAI/hyperflow-h3-flash`, under the
+  MiniMax H3 Community License - territory excludes the US, UK, EU and South Korea without prior
+  authorization. Upstream also carries Q3_K_M..Q8_0 and a separate `ref2va` partition.
+- **Node pack:** `ComfyUI/custom_nodes/ComfyUI-HyperFlow-Flash` (GPL-3.0), imported rather than
+  vendored so the licence stays out of this repo. It needs ComfyUI-GGUF;
+  `h3_hyperflow.load_node_packs()` registers both in this process because the loader looks
+  `UnetLoaderGGUF` up in ComfyUI's node registry.
+- **The contract:** euler + BasicGuider + `h3_hyperflow.sigmas(model, steps)`. No negative prompt,
+  no LoRA, no sigma-shift override, no sol-attn - the two-time conditioning carries the quality,
+  and the accelerators above were built for the full-size transformer.
+
+Measured at 1344x768, 6 steps, Q4_K_M, int8 video VAE:
+
+| frames | denoise | decode + mux |
+|---|---|---|
+| 22 (0.9 s) | 10.4 s | 2.9 s |
+| 73 (3.0 s), i2v first keyframe | 46.3 s | ~5 s |
+| 124 (5.2 s) | 88.4 s | 8.0 s |
+
+96 s end to end for a 5.2 s clip, against the vendor's 99 s for this quant on a 5090; the DiT
+holds ~9.1 GB resident. The loader reports `blocks=47 params=9.04B (low-rank linears=102,
+split-qkv=17)` and `two-time (t,r) conditioning: on` - if that line says OFF, the checkpoint has
+no endpoint embedder and sampling silently degrades to r = t.
+
+Two shared-lib fixes fell out of this, both regression-checked on the full-size base. The int8
+convrot video VAE keeps 267 of 559 parameters with `requires_grad=True`, and a model patched
+*after* ComfyUI loaded it (HyperFlow installs its two-time embedder and low-rank wrappers
+post-load) can hand the sampler's output back attached to a graph. comfy-kitchen's fused int8
+kernels export their operands through dlpack, which refuses grad-carrying tensors, so
+`load_vae` now freezes the VAE and `decode` detaches the video stream **after** `unbind()` -
+H3's packed latent is a NestedTensor, and NestedTensor has no `.detach()`.
 
 ## Upscaling an existing clip (ComfyUI-Tessera + Ref2VA)
 

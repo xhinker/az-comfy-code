@@ -302,7 +302,11 @@ def decode(vae, audio_vae, latent, out_path, *, fps: float = 24.0, tile_size: in
 
     if release:
         free_all()          # the DiT is done; the video VAE needs several GB of activations
-    video_latent = latent["samples"].unbind()[0]      # last stream is the audio one
+    # detach after unbind: H3's packed latent is a NestedTensor (video + audio streams) and
+    # NestedTensor has no .detach(). The sampler can hand back a tensor still attached to the
+    # DiT graph, and the int8 video VAE then dies inside comfy-kitchen on a grad-carrying
+    # operand ("Can't export tensors that require gradient").
+    video_latent = latent["samples"].unbind()[0].detach()      # last stream is the audio one
     try:
         frames = vae.decode(video_latent) if not tile_size else _decode_tiled(vae, video_latent, tile_size)
     except Exception as e:
