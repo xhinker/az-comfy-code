@@ -83,6 +83,35 @@ What that means in practice:
   banding get upscaled into permanent structure. Deint/denoise/decdeblock upstream if the
   source is a bad rip, and keep the encode you feed it high quality (CRF 12-15 or a lossless
   intermediate).
+- **Big frames need `--tiles COLSxROWS`.** The Wan backbone keeps a keyframe K/V cache of
+  `(W/wan_stride) x (H/wan_stride) x 3072 x 2 (k+v) x 2 bytes x 5 keyframes x 30 layers`, which
+  is the term that OOMs and the one `--offload` cannot touch (offload parks the 5.2 GB of
+  weights, nothing else):
+
+  | input | x4 K/V cache | x2 K/V cache |
+  |---|---|---|
+  | 624x360 | 6.5 GB | 1.6 GB |
+  | 912x1280 | **33.6 GB** | 8.4 GB |
+  | 1920x1080 | 59.7 GB | 14.8 GB |
+
+  Tiling renders overlapping rectangles one at a time and stitches them with a linear
+  cross-fade, so peak VRAM follows the tile. Measured on a 5090 (x4 weights, 64 px overlap):
+
+  | source | tiles | peak VRAM | speed |
+  |---|---|---|---|
+  | 912x1280 untiled | - | OOM at 33.6 GB | - |
+  | 912x1280 | 2x2 | 14.6 GB | 1.77 fps (81-frame clip, `--downscale 0.5`) |
+  | 1080x1514 | 2x2 | 18.0 GB | 1.26 fps |
+  | 1080x1514 | 3x3 | 11.6 GB | 1.22 fps |
+
+  Tiling is not visually lossy: on the demo clip, 2x2 tiled vs untiled with the same seed
+  differs by 1.09/255 mean (p99 = 7), the overlap band sits at 1.43 vs 1.05 elsewhere, and the
+  worst single column is nowhere near a seam edge - i.e. the difference is the model seeing a
+  slightly different neighbourhood, not a stitching artifact. Tiles are held in **system RAM**
+  (tiles x frames x out pixels x 3), printed up front: ~18 GB for an 81-frame 912x1280 x4 run.
+  The Wan attention window spans 22x40 patches = 176x320 input pixels under the x4 weights, so
+  an overlap of half that is the theoretically clean cut; 64 px is the community default and
+  measured fine above.
 - **Output encode is not the quality limit.** `CRF 18 / medium` costs under a second per 24
   frames against ~15 s of model time; go to CRF 16 or `veryslow` for free if you care about the
   file rather than the wall clock.
@@ -95,7 +124,7 @@ What that means in practice:
 | File | What it is |
 |---|---|
 | `relayvsr_interactive.py` | `# %%` cells: input, settings, weights, engine, **load the diffusion model**, **load the Flash (VAE-side) model**, run, save the output video, free |
-| `relayvsr_upscale.py` | the same pipeline as a CLI (`--scale`, `--sr-ratio`, `--chunk-len`, `--detail`, `--downscale`, `--offload`, `--codec`, `--crf`) |
+| `relayvsr_upscale.py` | the same pipeline as a CLI (`--scale`, `--sr-ratio`, `--chunk-len`, `--detail`, `--downscale`, `--tiles`, `--offload`, `--codec`, `--crf`) |
 | `lib/relayvsr_load.py` | the ComfyUI-core bootstrap: `COMFY` / `PYTHON` paths, weight resolution, `engine()`, `load_wan()`, `load_flash()`, `run()`, `save()`, `free()`, `vram_line()` |
 | `lib/relayvsr_engine.py` | assembly + streaming inference: `load_wan()` / `load_flash()` / `restore(frames, seed, sr_ratio, chunk_len)` |
 | `lib/relayvsr_wan.py` `lib/relayvsr_flash.py` | the two networks: pre / blocks / post, ring K/V caches, windowed attention |
@@ -142,6 +171,7 @@ Single-connection downloads from HF run ~0.9 MB/s on this box and the `hf` CLI s
 ./relayvsr_upscale.py inputs/demo_input.mp4 --scale 4 --sr-ratio 4 --max-frames 96
 ./relayvsr_upscale.py clip.mp4 --scale 4 --sr-ratio 2 --offload      # 24 GB cards
 ./relayvsr_upscale.py clip.mp4 --scale 4 --sr-ratio 4 --downscale 720  # render 4x, save at 720p
+./relayvsr_upscale.py big.mp4 --scale 4 --sr-ratio 4 --tiles 2x2        # big frames only fit tiled
 ./relayvsr_upscale.py clip.mp4 --scale 4 --sr-ratio 4 --downscale 0.5  # ...or half the model output
 ```
 
@@ -165,6 +195,18 @@ Sanity check that it is really generating detail rather than sharpening: Laplaci
 the output vs bicubic-upscaled input, per frame: **8.4 -> 81.9** and **6.7 -> 54.8**.
 
 ## Things that bit us
+
+- **Peak VRAM used to be reported from the encoder's peak only.** `save()` reset the peak
+  counters, which is wrong for the tiled path because every tile renders eagerly inside
+  `run_tiled()`. The reset now happens at the start of `run()` / `run_tiled()` (`_reset_peak`),
+  and `save()` only reports. A tiled 912x1280 x4 run reads 14.6 GB, not the 0.7 GB the old
+  accounting printed.
+- **Windowed SDPA materialises its scores.** A masked `scaled_dot_product_attention` cannot use
+  the flash or memory-efficient backends, so the score tensor (queries x key_length x heads) is
+  allocated in full. The query chunk was sized only against the K/V gather budget, so at
+  760x1066 one call asked for 4.62 GB of scores and OOM'd. `relayvsr_attention.py` now caps both
+  (`_GATHER_BYTES`, `_SCORE_BYTES`); on the demo clip that cut peak VRAM 20.4 -> 16.4 GB and cost
+  about 4% speed.
 
 - **The Comfy-Org Wan file renames every parameter** relative to the official checkpoint:
   `attn1.to_q` -> `self_attn.q`, `condition_embedder.text_embedder.linear_1` ->

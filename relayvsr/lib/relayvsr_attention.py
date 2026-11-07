@@ -25,6 +25,11 @@ import torch.nn.functional as F
 _TILE = 16
 _CACHE_BYTES = 1 << 30
 _GATHER_BYTES = 1 << 30
+# SDPA with an arbitrary window mask cannot use the flash/mem-efficient backends, so the
+# scores tensor (queries x key_length x heads) is materialised. Chunking only on the K/V
+# gather size left that tensor unbounded: at 760x1066 a single call wanted 4.6 GB of scores
+# and OOM'd on a 32 GB card even though the gather itself was under 1 GB. Cap both.
+_SCORE_BYTES = 1 << 29
 
 _layouts = OrderedDict()
 _layout_bytes = 0
@@ -123,7 +128,10 @@ def local_attention(query, key, value, height, width, windows, shifted):
         for wh, ww in windows
     ]
     bytes_per_tile = sum(lengths) * kv_heads * dim * key.element_size() * 2
-    limit = max(1, min(128, _GATHER_BYTES // max(1, bytes_per_tile)))
+    scores_per_tile = _TILE * _TILE * max(lengths) * heads * key.element_size()
+    limit = max(1, min(128,
+                       _GATHER_BYTES // max(1, bytes_per_tile),
+                       _SCORE_BYTES // max(1, scores_per_tile)))
     chunk = 1 << (limit.bit_length() - 1)
     parts = _layout(height, width, windows, shifted, chunk, query.device)
 

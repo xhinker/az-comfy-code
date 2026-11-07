@@ -31,6 +31,11 @@ START_FRAME = 0
 SCALE       = 2                     # which weights to use: 2 or 4
 SR_RATIO    = 2                     # output ratio: x2 weights take 2; x4 weights take 2 or 4
 CHUNK_LEN   = 16                    # frames per streaming window (reference interval + 1)
+TILES       = "3x3"                 # "2x2" / "3x3" renders the frame in overlapping spatial
+                                    # tiles and stitches them. Big frames need it: the Wan
+                                    # keyframe K/V cache scales with frame area (912x1280 at
+                                    # x4 = 33.6 GB, which is more than the card)
+TILE_OVERLAP = 64                   # overlap between tiles, in input pixels
 SEED        = 42                    # only the reference-frame noise; the model is 1-step distilled
 DETAIL      = 1.0                   # 0-1: how much decoder detail is added on top of bicubic.
                                     # 1.0 = the model's full output; drop to ~0.7 if it over-sharpens
@@ -61,9 +66,15 @@ L.load_flash(engine)
 # %% 7. run  - builds the frame stream; the actual compute happens in cell 8
 INPUT = str(BASE / "inputs" / "demo_input.mp4")   # the official demo clip; point this at any mp4
 
-frames, plan = L.run(engine, INPUT, sr_ratio=SR_RATIO, chunk_len=CHUNK_LEN, seed=SEED,
-                     detail=DETAIL, downscale=DOWNSCALE or None,
-                     max_frames=MAX_FRAMES, start_frame=START_FRAME)
+if L.parse_tiles(TILES) != (1, 1):
+    frames, plan = L.run_tiled(engine, INPUT, tiles=TILES, overlap=TILE_OVERLAP,
+                               sr_ratio=SR_RATIO, chunk_len=CHUNK_LEN, seed=SEED, detail=DETAIL,
+                               downscale=DOWNSCALE or None, max_frames=MAX_FRAMES,
+                               start_frame=START_FRAME)
+else:
+    frames, plan = L.run(engine, INPUT, sr_ratio=SR_RATIO, chunk_len=CHUNK_LEN, seed=SEED,
+                         detail=DETAIL, downscale=DOWNSCALE or None,
+                         max_frames=MAX_FRAMES, start_frame=START_FRAME)
 plan
 
 ## %% 8. save the output video

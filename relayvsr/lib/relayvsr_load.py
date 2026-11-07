@@ -35,6 +35,7 @@ Pylance needs `relayvsr/lib` in python.analysis.extraPaths (.vscode/settings.jso
 """
 from __future__ import annotations
 
+import math
 import pathlib
 import sys
 
@@ -148,6 +149,17 @@ def load_flash(eng, verbose: bool = True):
     return eng
 
 
+def _reset_peak():
+    """Start the peak-VRAM clock at the beginning of the pipeline, not at the encoder.
+
+    The tiled path renders every tile eagerly inside run_tiled(), so resetting in save()
+    would miss the whole model pass and report a number that is not the peak.
+    """
+    import torch
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
 def vram_line() -> str:
     import torch
     if not torch.cuda.is_available():
@@ -223,6 +235,7 @@ def run(eng, input_path, sr_ratio: int = 2, chunk_len: int = 16, seed: int = 42,
     """
     import relayvsr_media as media
 
+    _reset_peak()
     info = media.video_info(input_path)
     target = eng.geometry.output_size(sr_ratio, info["height"], info["width"])
     plan = {
@@ -250,6 +263,85 @@ def relayv_iter(input_path, max_frames: int = 0, start_frame: int = 0):
     return media.iter_frames(input_path, max_frames=max_frames, start_frame=start_frame)
 
 
+def parse_tiles(spec):
+    """"2x2" -> (cols, rows); a bare "3" means 3x3; "" or "1" means no tiling."""
+    s = "" if spec is None else str(spec).strip().lower().replace(" ", "")
+    if not s:
+        return (1, 1)
+    if "x" in s:
+        try:
+            cols, rows = (int(v) for v in s.split("x", 1))
+        except ValueError:
+            raise SystemExit(f"tiles: expected COLSxROWS, got {spec!r}")
+    else:
+        cols = rows = int(s)
+    if min(cols, rows) < 1 or max(cols, rows) > 16:
+        raise SystemExit(f"tiles: COLSxROWS must be between 1 and 16 (got {spec!r})")
+    return (cols, rows)
+
+
+def run_tiled(eng, input_path, tiles="2x2", overlap: int = 64, sr_ratio: int = 4,
+              chunk_len: int = 16, seed: int = 42, detail: float = 1.0, downscale=None,
+              max_frames: int = 0, start_frame: int = 0, check=None):
+    """Render the frame in overlapping spatial tiles and stitch, so VRAM follows the tile.
+
+    Each tile goes through the whole pipeline (Wan reference + Flash decode) as if it were a
+    standalone frame, one tile at a time - that is what keeps the Wan keyframe K/V cache, the
+    term that OOMs on big frames, proportional to the tile instead of the frame. Rendered tiles
+    are held in system RAM and blended per output frame, so RAM costs tiles x frames x out pixels.
+    """
+    import relayvsr_media as media
+    from relayvsr_tiling import axis_alphas, grid, stitch
+
+    _reset_peak()
+    info = media.video_info(input_path)
+    cols, rows = parse_tiles(tiles)
+    cells, tiles_y, tiles_x = grid(info["width"], info["height"], cols, rows,
+                                   int(overlap), eng.geometry.wan_stride)
+    frames_in = max(0, int(info["frames"]) - int(start_frame))
+    if max_frames:
+        frames_in = min(frames_in, int(max_frames))
+    out_w, out_h = info["width"] * int(sr_ratio), info["height"] * int(sr_ratio)
+    biggest = max((y1 - y0) * (x1 - x0) for (y0, y1, x0, x1) in cells)
+    hold_gb = len(cells) * frames_in * out_w * out_h * 3 / 1e9
+    print(f"tiling {cols}x{rows} = {len(cells)} tiles, overlap {overlap} px, "
+          f"largest tile {int(math.sqrt(biggest))} px^2 area; holding {frames_in} frames x "
+          f"{len(cells)} tiles in system RAM ~{hold_gb:.1f} GB")
+
+    rendered = []
+    for (y0, y1, x0, x1) in cells:
+        stream = (frame[:, y0:y1, x0:x1] for frame in
+                  media.iter_frames(input_path, max_frames=max_frames, start_frame=start_frame))
+        rendered.append([f for f in eng.restore(
+            stream, seed=seed, sr_ratio=sr_ratio, chunk_len=chunk_len, detail=detail, check=check,
+        )])
+    counts = {len(tile) for tile in rendered}
+    if len(counts) != 1:
+        raise RuntimeError(f"RelayVSR tiles rendered different frame counts: {sorted(counts)}")
+
+    scale = int(sr_ratio)
+    alphas_y, alphas_x = axis_alphas(tiles_y, scale), axis_alphas(tiles_x, scale)
+
+    def stitched():
+        for index in range(len(rendered[0])):
+            yield stitch([tile[index] for tile in rendered], tiles_y, tiles_x, alphas_y, alphas_x, scale)
+
+    plan = {
+        "input": str(input_path), "in_size": (info["width"], info["height"]),
+        "out_size": (out_w, out_h), "fps": info["fps"], "frames_in_file": info["frames"],
+        "sr_ratio": sr_ratio, "native_scale": eng.geometry.scale, "chunk_len": chunk_len,
+        "seed": seed, "detail": detail, "tiles": (cols, rows), "tile_overlap": int(overlap),
+        "tile_count": len(cells), "max_frames": max_frames, "start_frame": start_frame,
+        "has_audio": info["has_audio"],
+    }
+    frames = stitched()
+    size = parse_downscale(downscale, *plan["out_size"]) if downscale else None
+    if size:
+        frames = downscale_frames(frames, size)
+        plan["model_size"], plan["out_size"], plan["downscale"] = plan["out_size"], size, str(downscale)
+    return frames, plan
+
+
 def save(frames, out_path, fps: float, codec: str = "h264", crf: int = 18,
          preset: str = "medium", audio_from=None, report_every: int = 16):
     """Consume the frames from run() into a video file. Returns (path, frames_written, seconds)."""
@@ -257,8 +349,6 @@ def save(frames, out_path, fps: float, codec: str = "h264", crf: int = 18,
     import torch
     import relayvsr_media as media
 
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
     t0 = time.perf_counter()
     with media.VideoWriter(out_path, fps=fps, codec=codec, crf=crf, preset=preset,
                            audio_from=audio_from) as writer:

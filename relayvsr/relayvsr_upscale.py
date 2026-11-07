@@ -32,6 +32,12 @@ def main():
     p.add_argument("--offload", action="store_true", help="park Wan blocks in CPU RAM (24 GB cards)")
     p.add_argument("--codec", default="h264", choices=("h264", "h265", "libx264", "libx265"))
     p.add_argument("--crf", type=int, default=18)
+    p.add_argument("--tiles", default="",
+                   help='render in overlapping spatial tiles, "COLSxROWS" (e.g. 2x2). This is how '
+                        "big frames fit: the Wan keyframe K/V cache scales with frame area, and "
+                        "tiles are rendered one at a time")
+    p.add_argument("--tile-overlap", type=int, default=64,
+                   help="overlap between spatial tiles, in input pixels (cross-faded linearly)")
     p.add_argument("--downscale", default="",
                    help="shrink the saved video: 0.5 = half the model output, 720 = target height, "
                         "1248x720 = exact size. Lanczos, applied after the model - so x4 weights "
@@ -50,13 +56,20 @@ def main():
     L.load_wan(engine)
     L.load_flash(engine)
 
-    frames, plan = L.run(engine, str(src), sr_ratio=args.sr_ratio, chunk_len=args.chunk_len,
-                         seed=args.seed, detail=args.detail, downscale=args.downscale or None,
-                         max_frames=args.max_frames, start_frame=args.start_frame)
+    if L.parse_tiles(args.tiles) != (1, 1):
+        frames, plan = L.run_tiled(engine, str(src), tiles=args.tiles, overlap=args.tile_overlap,
+                                   sr_ratio=args.sr_ratio, chunk_len=args.chunk_len, seed=args.seed,
+                                   detail=args.detail, downscale=args.downscale or None,
+                                   max_frames=args.max_frames, start_frame=args.start_frame)
+    else:
+        frames, plan = L.run(engine, str(src), sr_ratio=args.sr_ratio, chunk_len=args.chunk_len,
+                             seed=args.seed, detail=args.detail, downscale=args.downscale or None,
+                             max_frames=args.max_frames, start_frame=args.start_frame)
     model = f" (model rendered {plan['model_size']}, downscaled {plan['downscale']})" \
         if "model_size" in plan else ""
+    tiled = f", {plan['tile_count']} tiles x{plan['tile_overlap']}px overlap" if "tile_count" in plan else ""
     print(f"{plan['in_size']} -> {plan['out_size']} @ {plan['fps']:.2f} fps, "
-          f"native x{plan['native_scale']}, chunk {plan['chunk_len']}{model}")
+          f"native x{plan['native_scale']}, chunk {plan['chunk_len']}{tiled}{model}")
     path, written, seconds = L.save(frames, out, fps=plan["fps"], codec=args.codec, crf=args.crf,
                                     preset=args.preset, audio_from=src if plan["has_audio"] else None)
     print(f"saved {written} frames in {seconds:.1f} s ({written / seconds:.2f} fps) -> {path}")
