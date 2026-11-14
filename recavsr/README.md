@@ -75,20 +75,23 @@ clip. `run_example.sh` has the whole set, including the `--post-size` and `--kv-
 
 ## Measured on this box
 
-RTX 5090 (32 GB), int8 ConvRot weights, `fast` kernels, `flashdecoder`, 32 frames of the
-624x360 demo clip:
+RTX 5090 (32 GB), int8 ConvRot weights, `fast` kernels, `flashdecoder`, the 624x360 demo clip:
 
 ```
-scale 2 -> 1248x720    32 frames in  9.9 s  = 3.24 fps   (block 1 1286 ms, then ~3650/89 ms)
-scale 4 -> 2496x1440   32 frames in  9.1 s  = 3.50 fps   transformer 6.6 s, decode 0.6 s
-                        peak after the run: 15.8 GiB of the 31.4 GiB card
-encoder: hevc nvenc picked by itself; 1248x720 and 2496x1440 both mux clean
-scale 4 with --kv-offload: same ballpark, more headroom for bigger frames
+scale 4 -> 2496x1440   96 frames in 7.6 s = 12.6 fps
+   block  1/11 (21 frames)  transformer 1407 ms   decode 390 ms   <- pays the triton compile
+   blocks 2-11 (8 frames)   transformer  ~290 ms   decode  ~86 ms  <- steady state, 12.6 fps
+scale 2 -> 1248x720    32 frames in 9.9 s
+peak VRAM at 1440p: 15.8 GiB of the 31.4 GiB card; cell 3 drops it to 1.5
 ```
 
-`fit()` predicted 8.9 GiB for the 1440p step; the real peak (weights 6.0 + activations) landed at
-about 15.8 GiB, so the estimate is the right order and the right shape: a 24 GB card runs 1440p
-with room, and `--kv-offload` is what buys the step beyond that.
+**Judge it per block, not per clip.** A 32-frame run measured 3.5 fps end to end earlier and that
+number is misleading: the first block carries roughly a second of triton compilation, so short
+clips look four times slower than the same pipeline at steady state.
+
+`fit()` predicted 8.9 GiB for the 1440p step; weights 6.0 + activations landed at about 15.8 GiB,
+so the estimate is the right order and the right shape: a 24 GB card runs 1440p with room, and
+`--kv-offload` is what buys the step beyond that.
 
 ## Gotchas
 

@@ -8,6 +8,7 @@ Audio is read once, whole, and handed to the writer for the mux.
 from __future__ import annotations
 
 import pathlib
+import shutil
 import subprocess
 from fractions import Fraction
 
@@ -120,3 +121,57 @@ def list_inputs(folder="inputs") -> list[pathlib.Path]:
         return []
     return sorted(p for p in root.iterdir()
                   if p.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm", ".avi") and p.stat().st_size > 0)
+
+
+def shrink(src, size: str = "0.5", dst=None, crf: int = 20, keep_original: bool = True) -> pathlib.Path:
+    """Re-encode an already-rendered clip at a smaller size, without touching the model.
+
+    `size` is "0.5" (half each way), "720" (a target height) or "1248x720" (exact) - the same
+    syntax as --post-size. Lanczos on the pixels, then hevc: NVENC when it opens on this box,
+    otherwise x265. Audio is stream-copied, so nothing about the sound changes.
+
+    This is the cheap way to keep a 4x render: the model already did the work, and a shrink pass
+    costs seconds on the encoder instead of another render. It is NOT the same as asking the
+    model for a smaller ratio - 4x then shrunk keeps more detail than rendering at 2x.
+    """
+    src = pathlib.Path(src)
+    if not src.is_file():
+        raise SystemExit(f"shrink: no such file: {src}")
+    if not shutil.which("ffmpeg"):
+        raise SystemExit("shrink: ffmpeg is not on this kernel's PATH - the shrink pass is an "
+                         "ffmpeg re-encode, it does not run through PyAV")
+    info = probe(src)
+    width, height = parse_size(str(size), info["width"], info["height"])
+    width &= ~1                      # hevc wants even dimensions
+    height &= ~1
+    if (width, height) == (info["width"], info["height"]):
+        print(f"shrink: {size} is already {info['width']}x{info['height']}, nothing to do")
+        return src
+    dst = pathlib.Path(dst) if dst else src.with_name(f"{src.stem}_to{width}x{height}.mp4")
+    tmp = dst.with_suffix(".part.mp4")
+    scale = f"scale={width}:{height}:flags=lanczos"
+    encoders = [("hevc_nvenc", ["-rc", "vbr", "-cq", str(crf), "-b:v", "0", "-preset", "p5", "-tune", "hq"]),
+                ("libx265", ["-crf", str(crf), "-preset", "medium"])]
+    last = ""
+    for codec, opts in encoders:
+        cmd = (["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vf", scale, "-c:v", codec, *opts,
+                "-pix_fmt", "yuv420p", "-tag:v", "hvc1", "-c:a", "copy", str(tmp)])
+        done = subprocess.run(cmd, capture_output=True, text=True)
+        if done.returncode == 0 and tmp.is_file() and tmp.stat().st_size > 1024:
+            break
+        last = done.stderr.strip().splitlines()[-1] if done.stderr.strip() else codec + " failed"
+        tmp.unlink(missing_ok=True)
+    else:
+        raise RuntimeError(f"no hevc encoder produced a file: {last}")
+    out = probe(tmp)
+    if out["frames"] and out["frames"] != info["frames"]:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"shrink lost frames: {info['frames']} -> {out['frames']}")
+    before = src.stat().st_size          # read it before anything is removed
+    tmp.replace(dst)
+    if not keep_original and dst != src:
+        src.unlink()
+    print(f"shrink {info['width']}x{info['height']} -> {width}x{height}   "
+          f"{before / 2**20:.0f} MB -> {dst.stat().st_size / 2**20:.0f} MB   ({dst.name})"
+          + ("" if keep_original else "   big render removed"))
+    return dst
