@@ -1,0 +1,20 @@
+# The clips you feed the scripts and the mp4s they write: keep the folders in git, ignore
+# everything inside them. The leading `!dir/` lines matter - the repo-root .gitignore excludes
+# `outputs/` as a directory, and git will not descend into an excluded directory to apply a
+# negation, so un-exclude the directory first.
+!inputs/
+inputs/*
+!inputs/.gitkeep
+
+!outputs/
+outputs/*
+!outputs/.gitkeep
+
+# The repo-root .gitignore carries a bare `lib/` (a Python-template artifact), which would
+# otherwise hide these modules. Negating the directory itself is what re-includes it.
+!lib/
+
+# Weights are NOT stored here: get_weights.sh puts them in ComfyUI's models/recavsr so the
+# ReCaVSR nodes and these scripts read the same files. A local override (RECAVSR_MODELS=...)
+# still stays out of git.
+models/
